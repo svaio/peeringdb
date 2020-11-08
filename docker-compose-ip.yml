@@ -1,0 +1,63 @@
+version: "3.5"
+
+services:
+  db:
+    image: mariadb:latest
+    container_name: peeringdb_db
+    command:
+      - "mysqld"
+      - "--innodb-file-per-table=1"
+      - "--lower-case-table-names=0"
+      - "--character-set-server=utf8"
+      - "--collation-server=utf8_unicode_ci"
+    volumes:
+      - "./database:/var/lib/mysql"
+    environment:
+      - "TZ=${TZ}"
+      - MYSQL_ROOT_PASSWORD=inet2020
+      - MYSQL_DATABASE=peeeringdb
+      - MYSQL_USER=peeringdb
+      - MYSQL_PASSWORD=inet2020
+    ports:
+      - 3307:3306
+    networks:
+        pdb_net:
+            ipv4_address: 172.16.238.10
+    restart: unless-stopped
+
+
+  peeringdb:
+    build:
+        context: .
+        dockerfile: Dockerfile
+    container_name: peeringdb
+    hostname: peeringdb
+    ports:
+      - "8080:8000"
+      - "8443:443"
+    depends_on:
+        - db
+    volumes:
+      - $PWD/mainsite:/srv/www.peeringdb.com/mainsite
+      - $PWD/peeringdb_server:/srv/www.peeringdb.com/peeringdb_server
+    environment:
+    - "TZ=${TZ}"
+    - DATABASE_ENGINE=mysql
+    - DATABASE_HOST=172.16.238.10
+    - DATABASE_PORT=3306
+    - DATABASE_PASSWORD=inet2020
+    - DATABASE_USER=peeringdb
+    - DATABASE_NAME=peeringdb
+    - RUNSERVER_BIND="0.0.0.0:8000"
+  networks:
+      pdb_net:
+          ipv4_address: 172.16.238.11
+
+    restart: always
+
+networks:
+    pdb_net:
+        ipam:
+            driver: default
+            config:
+              - subnet: "172.16.238.0/24"
