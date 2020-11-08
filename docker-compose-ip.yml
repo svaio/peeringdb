@@ -14,10 +14,10 @@ services:
       - "./database:/var/lib/mysql"
     environment:
       - "TZ=${TZ}"
-      - MYSQL_ROOT_PASSWORD=inet2020
+      - MYSQL_ROOT_PASSWORD=peeringdb
       - MYSQL_DATABASE=peeeringdb
       - MYSQL_USER=peeringdb
-      - MYSQL_PASSWORD=inet2020
+      - MYSQL_PASSWORD=peeringdb
     ports:
       - 3307:3306
     networks:
