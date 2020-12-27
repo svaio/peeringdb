@@ -1,7 +1,8 @@
 version: "3.4"
 services:
   database:
-    image: "mysql:5.7"
+    image: "mariadb:latest"
+#    image: "mysql:5.7"
     command: mysqld --character-set-server=utf8 --collation-server=utf8_unicode_ci
     environment:
       MYSQL_DATABASE: peeringdb
@@ -29,6 +30,9 @@ services:
     command: runserver 0.0.0.0:8000
     env_file: .env
     environment:
+      DATABASE_ENGINE: "mysql"
+#      DATABASE_HOST: "127.0.0.1"
+      DATABASE_NAME: peeringdb
       DATABASE_USER: peeringdb
       DATABASE_PASSWORD: devPASSWORD
       DATABASE_HOST: database
@@ -38,6 +42,9 @@ services:
 #      options:
 #        max-size: 100m
 #        max-file: "3"
+    restart: always
+    depends_on:
+      - "database"
     ports:
       # this needs to be set in the shell, compose env vars aren't read yet
       - "${DJANGO_PORT:-8000}:8000"
