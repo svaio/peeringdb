@@ -1,40 +1,39 @@
+import datetime
+import io
 import json
 import os
 import re
-from pprint import pprint
-import reversion
-import requests
-import jsonschema
 import time
-import io
-import datetime
+from pprint import pprint
 
-from django.db import transaction
+import jsonschema
+import pytest
+import requests
+import reversion
 from django.core.cache import cache
-from django.test import Client, TestCase, RequestFactory
+from django.db import transaction
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 
-import django_namespace_perms as nsp
-
+from peeringdb_server import ixf
 from peeringdb_server.models import (
-    Organization,
-    Network,
-    NetworkIXLan,
-    IXLan,
-    IXLanPrefix,
+    DeskProTicket,
+    Group,
     InternetExchange,
     IXFMemberData,
+    IXLan,
     IXLanIXFMemberImportAttempt,
     IXLanIXFMemberImportLog,
     IXLanIXFMemberImportLogEntry,
+    IXLanPrefix,
+    Network,
+    NetworkIXLan,
+    Organization,
     User,
-    DeskProTicket,
-    Group
 )
-from peeringdb_server import ixf
 
-import pytest
 from .util import override_group_id
+
 
 @pytest.mark.django_db
 def test_reset_ixf_proposals(admin_user, entities, ip_addresses):
@@ -55,7 +54,7 @@ def test_reset_ixf_proposals(admin_user, entities, ip_addresses):
 
 @pytest.mark.django_db
 def test_dismiss_ixf_proposals(admin_user, entities, ip_addresses):
-    
+
     network = entities["network"]
     ixlan = entities["ixlan"][0]
 
@@ -90,7 +89,7 @@ def test_reset_ixf_proposals_no_perm(regular_user, entities, ip_addresses):
 
 @pytest.mark.django_db
 def test_dismiss_ixf_proposals_no_perm(regular_user, entities, ip_addresses):
-    
+
     network = entities["network"]
     ixlan = entities["ixlan"][0]
 
@@ -141,7 +140,6 @@ def test_dismissed_note(admin_user, entities, ip_addresses):
     don't show the "you have dimissed suggestions" notification (#809)
     """
 
-
     network = entities["network"]
     ixlan_a = entities["ixlan"][0]
 
@@ -173,7 +171,7 @@ def test_dismissed_note(admin_user, entities, ip_addresses):
 
     with override_group_id():
         response = client.get(url)
-        
+
     content = response.content.decode("utf-8")
 
     # dismissed suggestion no longer relevant, confirm note is gibe
@@ -183,7 +181,7 @@ def test_dismissed_note(admin_user, entities, ip_addresses):
 
 
 @pytest.mark.django_db
-def test_check_ixf_proposals(admin_user, entities, ip_addresses):
+def test_check_ixf_proposals(admin_user, ixf_importer_user, entities, ip_addresses):
     network = Network.objects.create(
         name="Network w allow ixp update disabled",
         org=entities["org"][0],
@@ -228,7 +226,6 @@ def test_check_ixf_proposals(admin_user, entities, ip_addresses):
     importer = ixf.Importer()
     importer.update(ixlan, data=json_data)
 
-
     client = setup_client(admin_user)
     url = reverse("net-view", args=(network.id,))
 
@@ -259,7 +256,7 @@ def create_IXFMemberData(network, ixlan, ip_addresses, dismissed):
     """
     Creates IXFMember data. Returns the ids of the created instances.
     """
-    ids = [] 
+    ids = []
     for ip_address in ip_addresses:
         ixfmember = IXFMemberData.instantiate(
             network.asn, ip_address[0], ip_address[1], ixlan, data={"foo": "bar"}
@@ -269,8 +266,6 @@ def create_IXFMemberData(network, ixlan, ip_addresses, dismissed):
         ixfmember.save()
         ids.append(ixfmember.id)
     return ids
-
-
 
 
 @pytest.fixture
@@ -374,8 +369,8 @@ def admin_user():
     guest_group, _ = Group.objects.get_or_create(name="guest")
     user_group, _ = Group.objects.get_or_create(name="user")
 
-    print("Guest: {} {} ".format(guest_group, guest_group.id))
-    print("User: {} {} ".format(user_group, user_group.id))
+    print(f"Guest: {guest_group} {guest_group.id} ")
+    print(f"User: {user_group} {user_group.id} ")
 
     admin_user = User.objects.create_user(
         "admin", "admin@localhost", first_name="admin", last_name="admin"

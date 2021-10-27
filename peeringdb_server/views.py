@@ -1,93 +1,105 @@
-import os
-import json
+"""
+View definitions:
+
+- Login
+- Logout
+- Advanced search
+- User Profile
+- OAuth Profile
+- Landing page
+- Search results
+- Entity views (network, facility, internet exchange and organization)
+- Sponsorships
+- User Registration
+"""
 import datetime
+import json
+import os
 import re
 import uuid
 
+import requests
+import two_factor.views
 from allauth.account.models import EmailAddress
+from django.conf import settings as dj_settings
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.decorators import login_required
+from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from django.http import (
-    JsonResponse,
     HttpResponse,
-    HttpResponseRedirect,
-    HttpResponseNotFound,
     HttpResponseBadRequest,
     HttpResponseForbidden,
+    HttpResponseNotFound,
+    HttpResponseRedirect,
+    JsonResponse,
 )
-from django.conf import settings as dj_settings
-from django.shortcuts import render, redirect
-from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
-from django.contrib.auth import authenticate, logout, login
-from django.contrib.auth.decorators import login_required
+from django.shortcuts import redirect, render
+from django.template import loader
+from django.urls import Resolver404, resolve, reverse
+from django.utils import translation
+from django.utils.crypto import constant_time_compare
+from django.utils.decorators import method_decorator
+from django.utils.translation import ugettext_lazy as _
+from django.views import View
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
-from django.urls import resolve, reverse, Resolver404
-from django.template import loader
-from django.utils import translation
-from django.utils.translation import ugettext_lazy as _
-from django.utils.crypto import constant_time_compare
-from django_namespace_perms.util import (
-    get_perms,
-    has_perms,
-    load_perms,
-)
-from django_namespace_perms.constants import (
-    PERM_CRUD,
-    PERM_CREATE,
-    PERM_DELETE,
-    PERM_WRITE,
-)
-import requests
-
+from django_grainy.util import Permissions
+from django_otp.plugins.otp_email.models import EmailDevice
+from grainy.const import PERM_CREATE, PERM_CRUD, PERM_DELETE, PERM_UPDATE
 from oauth2_provider.decorators import protected_resource
 from oauth2_provider.oauth2_backends import get_oauthlib_core
-
-from django_otp.plugins.otp_email.models import EmailDevice
-import two_factor.views
+from ratelimit.decorators import ratelimit
 
 from peeringdb_server import settings
-from peeringdb_server.search import search
-from peeringdb_server.stats import stats as global_stats
-from peeringdb_server.org_admin_views import load_all_user_permissions
-from peeringdb_server.data_views import BOOL_CHOICE
+from peeringdb_server.api_key_views import load_all_key_permissions
+from peeringdb_server.data_views import BOOL_CHOICE, BOOL_CHOICE_WITH_OPT_OUT
+from peeringdb_server.deskpro import ticket_queue_rdap_error
+from peeringdb_server.forms import (
+    AffiliateToOrgForm,
+    OrganizationLogoUploadForm,
+    PasswordChangeForm,
+    PasswordResetForm,
+    UserCreationForm,
+    UserLocaleForm,
+    UsernameRetrieveForm,
+)
+from peeringdb_server.inet import (
+    RdapException,
+    RdapInvalidRange,
+    asn_is_bogon,
+    rdap_pretty_error_message,
+)
+from peeringdb_server.mail import mail_username_retrieve
 from peeringdb_server.models import (
-    UserOrgAffiliationRequest,
-    User,
-    UserPasswordReset,
-    Organization,
-    Network,
-    NetworkFacility,
-    NetworkIXLan,
-    InternetExchange,
-    InternetExchangeFacility,
-    IXFMemberData,
-    Facility,
-    Sponsorship,
-    Partnership,
     PARTNERSHIP_LEVELS,
     REFTAG_MAP,
     UTC,
+    Facility,
+    InternetExchange,
+    InternetExchangeFacility,
+    IXFMemberData,
+    Network,
+    NetworkContact,
+    NetworkFacility,
+    NetworkIXLan,
+    Organization,
+    Partnership,
+    Sponsorship,
+    User,
+    UserOrgAffiliationRequest,
+    UserPasswordReset,
 )
-from peeringdb_server.forms import (
-    UserCreationForm,
-    PasswordResetForm,
-    PasswordChangeForm,
-    AffiliateToOrgForm,
-    UsernameRetrieveForm,
-    UserLocaleForm,
-)
+from peeringdb_server.org_admin_views import load_all_user_permissions
+from peeringdb_server.search import search
 from peeringdb_server.serializers import (
-    OrganizationSerializer,
-    NetworkSerializer,
-    InternetExchangeSerializer,
     FacilitySerializer,
+    InternetExchangeSerializer,
+    NetworkSerializer,
+    OrganizationSerializer,
 )
-from peeringdb_server.inet import RdapLookup, RdapException
-from peeringdb_server.mail import mail_username_retrieve
-from peeringdb_server.deskpro import ticket_queue_rdap_error
-
-from peeringdb_server import maintenance
-
-from ratelimit.decorators import ratelimit, is_ratelimited
+from peeringdb_server.stats import get_fac_stats, get_ix_stats
+from peeringdb_server.stats import stats as global_stats
+from peeringdb_server.util import APIPermissionsApplicator, check_permissions
 
 RATELIMITS = dj_settings.RATELIMITS
 
@@ -104,8 +116,8 @@ BASE_ENV = {
 
 def field_help(model, field):
     """
-    helper function return help_text of a model
-    field
+    Helper function return help_text of a model
+    field.
     """
     return model._meta.get_field(field).help_text
 
@@ -118,18 +130,17 @@ def is_oauth_authorize(url):
 
 def export_permissions(user, entity):
     """
-    returns dict of permission bools for the specified user and entity
-
-    to be used in template context
+    Return dict of permission bools for the specified user and entity
+    to be used in template context.
     """
 
     if entity.status == "deleted":
         return {}
 
     perms = {
-        "can_write": has_perms(user, entity, PERM_WRITE),
-        "can_create": has_perms(user, entity, PERM_CREATE),
-        "can_delete": has_perms(user, entity, PERM_DELETE),
+        "can_write": check_permissions(user, entity, PERM_UPDATE),
+        "can_create": check_permissions(user, entity, PERM_CREATE),
+        "can_delete": check_permissions(user, entity, PERM_DELETE),
     }
 
     if entity.status == "pending":
@@ -139,8 +150,10 @@ def export_permissions(user, entity):
     if perms["can_write"] or perms["can_create"] or perms["can_delete"]:
         perms["can_edit"] = True
 
-    if hasattr(entity, "nsp_namespace_manage"):
-        perms["can_manage"] = has_perms(user, entity.nsp_namespace_manage, PERM_CRUD)
+    if hasattr(entity, "grainy_namespace_manage"):
+        perms["can_manage"] = check_permissions(
+            user, entity.grainy_namespace_manage, PERM_CRUD
+        )
     else:
         perms["can_manage"] = False
 
@@ -151,21 +164,18 @@ class DoNotRender:
     """
     Instance of this class is sent when a component attribute does not exist,
     this can then be type checked in the templates to remove non existant attribute
-    rows while still allowing attributes with nonetype values to be rendered
+    rows while still allowing attributes with nonetype values to be rendered.
     """
 
     @classmethod
     def permissioned(cls, value, user, namespace, explicit=False):
-
         """
         Check if the user has permissions to the supplied namespace
         returns a DoNotRender instance if not, otherwise returns
-        the supplied value
+        the supplied value.
         """
 
-        b = has_perms(user, namespace.lower(), 0x01, explicit=explicit)
-        print(namespace, b)
-        print(user)
+        b = check_permissions(user, namespace.lower(), 0x01, explicit=explicit)
         if not b:
             return cls()
         return value
@@ -176,10 +186,10 @@ class DoNotRender:
 
 def beta_sync_dt():
     """
-    Returns the next date for a beta sync
+    Return the next date for a beta sync.
 
     This is currently hard coded to return 00:00Z for the
-    next sunday
+    next Sunday.
     """
     dt = datetime.datetime.now() + datetime.timedelta(1)
 
@@ -232,8 +242,8 @@ def view_maintenance(request):
 @ratelimit(key="ip", rate=RATELIMITS["view_request_ownership_POST"], method="POST")
 def view_request_ownership(request):
     """
-    Renders the form that allows users to request ownership
-    to an unclaimed organization
+    Render the form that allows users to request ownership
+    to an unclaimed organization.
     """
 
     was_limited = getattr(request, "limited", False)
@@ -333,7 +343,7 @@ def view_request_ownership(request):
 @require_http_methods(["POST"])
 def cancel_affiliation_request(request, uoar_id):
     """
-    Cancels a user's affiliation request
+    Cancel a user's affiliation request.
     """
 
     # make sure user org affiliation request specified actually
@@ -355,8 +365,8 @@ def cancel_affiliation_request(request, uoar_id):
 @ratelimit(key="ip", method="POST", rate=RATELIMITS["view_affiliate_to_org_POST"])
 def view_affiliate_to_org(request):
     """
-    Allows the user to request affiliation with an organization through
-    an ASN they provide
+    Allow the user to request affiliation with an organization through
+    an ASN they provide.
     """
 
     if request.method == "POST":
@@ -400,10 +410,43 @@ def view_affiliate_to_org(request):
             )
 
         asn = form.cleaned_data.get("asn")
+        org_id = form.cleaned_data.get("org")
+        org_name = form.cleaned_data.get("org_name")
+
+        # Issue 931: Limit the number of requests
+        # for affiliation to an ASN/org to 1
+
+        # Need to match ASN to org id
+        # if network exists
+        if asn != 0 and Network.objects.filter(asn=asn).exists():
+            network = Network.objects.get(asn=asn)
+            org_id = network.org.id
+
+        already_requested_affil_response = JsonResponse(
+            {
+                "non_field_errors": [
+                    _("You already requested affiliation to this ASN/org")
+                ]
+            },
+            status=400,
+        )
+
+        pending_affil_reqs = request.user.pending_affiliation_requests
+        if org_id and pending_affil_reqs.filter(org_id=org_id).exists():
+            return already_requested_affil_response
+        elif asn and pending_affil_reqs.filter(asn=asn).exists():
+            return already_requested_affil_response
+        elif org_name and pending_affil_reqs.filter(org_name__iexact=org_name).exists():
+            return already_requested_affil_response
 
         request.user.flush_affiliation_requests()
 
         try:
+            # Issue 995: Block registering private ASN ranges
+            # Check if ASN is in private/reserved range
+            # Block submission if an org and private ASN is set
+            if asn_is_bogon(asn) and not settings.TUTORIAL_MODE:
+                raise RdapInvalidRange()
 
             uoar, created = UserOrgAffiliationRequest.objects.get_or_create(
                 user=request.user,
@@ -413,11 +456,15 @@ def view_affiliate_to_org(request):
                 status="pending",
             )
 
+        except RdapInvalidRange as exc:
+
+            return JsonResponse({"asn": rdap_pretty_error_message(exc)}, status=400)
+
         except RdapException as exc:
-            ticket_queue_rdap_error(request.user, asn, exc)
-            return JsonResponse(
-                {"asn": _("RDAP Lookup Error: {}").format(exc)}, status=400
-            )
+
+            ticket_queue_rdap_error(request, asn, exc)
+
+            return JsonResponse({"asn": rdap_pretty_error_message(exc)}, status=400)
 
         except MultipleObjectsReturned:
             pass
@@ -470,9 +517,10 @@ def view_set_user_locale(request):
         request.user.set_locale(loc)
 
         translation.activate(loc)
-        request.session[translation.LANGUAGE_SESSION_KEY] = loc
+        response = JsonResponse({"status": "ok"})
+        response.set_cookie(dj_settings.LANGUAGE_COOKIE_NAME, loc)
 
-        return JsonResponse({"status": "ok"})
+        return response
 
 
 @protected_resource(scopes=["profile"])
@@ -506,9 +554,9 @@ def view_profile_v1(request):
     # only add ddnetworks if networks scope is present
     if scope_networks:
         networks = []
-        load_perms(user)
+        perms = Permissions(user)
         for net in user.networks:
-            crud = get_perms(user._nsp_perms_struct, net.nsp_namespace.split(".")).value
+            crud = perms.get(net.grainy_namespace)
             networks.append(
                 dict(
                     id=net.id,
@@ -564,6 +612,10 @@ def view_verify(request):
         if EmailAddress.objects.filter(user=request.user).exists():
             EmailAddress.objects.filter(user=request.user).delete()
 
+        # email hasn't change, so we just do nothing
+        if request.user.email == request.POST.get("email"):
+            return JsonResponse({"status": "ok"})
+
         request.user.email = request.POST.get("email")
 
         if (
@@ -615,7 +667,7 @@ def view_password_change(request):
 @require_http_methods(["GET"])
 def view_username_retrieve(request):
     """
-    username retrieval view
+    Username retrieval view.
     """
     env = BASE_ENV.copy()
     env.update(
@@ -632,7 +684,7 @@ def view_username_retrieve(request):
 @ratelimit(key="ip", rate=RATELIMITS["view_username_retrieve_initiate"])
 def view_username_retrieve_initiate(request):
     """
-    username retrieval initiate view
+    Username retrieval initiate view.
     """
 
     was_limited = getattr(request, "limited", False)
@@ -669,10 +721,10 @@ def view_username_retrieve_initiate(request):
 @require_http_methods(["GET"])
 def view_username_retrieve_complete(request):
     """
-    username retrieval completion view
+    Username retrieval completion view.
 
-    show the list of usernames associated to an email if
-    the correct secret is provided
+    Show the list of usernames associated to an email if
+    the correct secret is provided.
     """
 
     secret = request.GET.get("secret")
@@ -701,7 +753,7 @@ def view_username_retrieve_complete(request):
 @ensure_csrf_cookie
 def view_password_reset(request):
     """
-    password reset initiation view
+    Password reset initiation view.
     """
 
     if request.method in ["GET", "HEAD"]:
@@ -781,7 +833,7 @@ def view_password_reset(request):
 @ensure_csrf_cookie
 def view_registration(request):
     """
-    user registration page view
+    User registration page view.
     """
     if request.user.is_authenticated:
         return view_index(
@@ -850,7 +902,7 @@ def view_registration(request):
 @ensure_csrf_cookie
 def view_index(request, errors=None):
     """
-    landing page view
+    Landing page view.
     """
     if not errors:
         errors = []
@@ -875,7 +927,7 @@ def view_component(
     request, component, data, title, perms=None, instance=None, **kwargs
 ):
     """
-    Generic component view
+    Generic component view.
     """
     if not perms:
         perms = {}
@@ -905,10 +957,62 @@ def view_component(
     return HttpResponse(template.render(env, request))
 
 
+class OrganizationLogoUpload(View):
+
+    """
+    Handles public upload and setting of organization logo (#346)
+    """
+
+    def post(self, request, id):
+
+        """upload and set a new logo"""
+
+        org = Organization.objects.get(pk=id)
+
+        # keep reference to current logo as we will need
+        # to remove it after the new logo has been uploaded
+        if org.logo:
+            old_file = org.logo.path
+        else:
+            old_file = None
+
+        # require update permissions to the org
+        if not check_permissions(request.user, org, "u"):
+            return JsonResponse({}, status=403)
+
+        form = OrganizationLogoUploadForm(request.POST, request.FILES, instance=org)
+
+        if form.is_valid():
+            form.save()
+            org.refresh_from_db()
+
+            # remove old file if it exists
+            if old_file and os.path.exists(old_file):
+                os.remove(old_file)
+
+            return JsonResponse({"status": "ok", "url": org.logo.url})
+        else:
+            return JsonResponse(form.errors, status=400)
+
+    def delete(self, request, id):
+
+        """delete the logo"""
+
+        org = Organization.objects.get(pk=id)
+
+        # require update permissions to the org
+        if not check_permissions(request.user, org, "u"):
+            return JsonResponse({}, status=403)
+
+        org.logo.delete()
+
+        return JsonResponse({"status": "ok"})
+
+
 @ensure_csrf_cookie
 def view_organization(request, id):
     """
-    View organization data for org specified by id
+    View organization data for org specified by id.
     """
 
     try:
@@ -928,12 +1032,12 @@ def view_organization(request, id):
     tags = ["fac", "net", "ix"]
     for tag in tags:
         model = REFTAG_MAP.get(tag)
-        perms["can_create_%s" % tag] = has_perms(
-            request.user, model.nsp_namespace_from_id(org.id, "create"), PERM_CREATE
+        perms["can_create_%s" % tag] = check_permissions(
+            request.user, model.Grainy.namespace_instance("*", org=org), PERM_CREATE
         )
-        perms["can_delete_%s" % tag] = has_perms(
+        perms["can_delete_%s" % tag] = check_permissions(
             request.user,
-            model.nsp_namespace_from_id(org.id, "_").strip("_"),
+            model.Grainy.namespace_instance("*", org=org),
             PERM_DELETE,
         )
 
@@ -967,12 +1071,32 @@ def view_organization(request, id):
 
     dismiss = DoNotRender()
 
+    # determine if logo is specified and set the
+    # logo url accordingly
+
+    if org.logo:
+        logo_url = org.logo.url
+    else:
+        logo_url = ""
+
     data = {
         "title": data.get("name", dismiss),
         "exchanges": exchanges,
         "networks": networks,
         "facilities": facilities,
         "fields": [
+            {
+                "name": "aka",
+                "label": _("Also Known As"),
+                "value": data.get("aka", dismiss),
+                "notify_incomplete": False,
+            },
+            {
+                "name": "name_long",
+                "label": _("Long Name"),
+                "value": data.get("name_long", dismiss),
+                "notify_incomplete": False,
+            },
             {
                 "name": "website",
                 "type": "url",
@@ -992,6 +1116,16 @@ def view_organization(request, id):
                 "value": data.get("address2", dismiss),
             },
             {
+                "name": "floor",
+                "label": _("Floor"),
+                "value": data.get("floor", dismiss),
+            },
+            {
+                "name": "suite",
+                "label": _("Suite"),
+                "value": data.get("suite", dismiss),
+            },
+            {
                 "name": "location",
                 "label": _("Location"),
                 "type": "location",
@@ -1007,6 +1141,12 @@ def view_organization(request, id):
                 "value": data.get("country", dismiss),
             },
             {
+                "name": "geocode",
+                "label": _("Geocode"),
+                "type": "geocode",
+                "value": data,
+            },
+            {
                 "readonly": True,
                 "name": "updated",
                 "label": _("Last Updated"),
@@ -1018,6 +1158,19 @@ def view_organization(request, id):
                 "help_text": _("Markdown enabled"),
                 "type": "fmt-text",
                 "value": data.get("notes", dismiss),
+            },
+            {
+                "name": "logo",
+                "label": _("Logo"),
+                "help_text": field_help(Organization, "logo")
+                + " - "
+                + _("Max size: {}kb").format(int(dj_settings.ORG_LOGO_MAX_SIZE / 1024)),
+                "type": "image",
+                "accept": dj_settings.ORG_LOGO_ALLOWED_FILE_TYPE,
+                "max_height": dj_settings.ORG_LOGO_MAX_VIEW_HEIGHT,
+                "max_size": dj_settings.ORG_LOGO_MAX_SIZE,
+                "upload_handler": f"/org/{org.id}/upload-logo",
+                "value": logo_url,
             },
         ],
     }
@@ -1048,6 +1201,12 @@ def view_organization(request, id):
     if perms.get("can_manage") and org.pending_affiliations.count() > 0:
         tab_init = {"users": "active"}
 
+    keys = [
+        {"prefix": key.prefix, "hashed_key": key.hashed_key, "name": key.name}
+        for key in org.api_keys.filter(revoked=False).all()
+    ]
+    data["phone_help_text"] = field_help(NetworkContact, "phone")
+
     return view_component(
         request,
         "organization",
@@ -1056,15 +1215,17 @@ def view_organization(request, id):
         tab_init=tab_init,
         users=users,
         user_perms=load_all_user_permissions(org),
+        key_perms=load_all_key_permissions(org),
         instance=org,
         perms=perms,
+        keys=keys,
     )
 
 
 @ensure_csrf_cookie
 def view_facility(request, id):
     """
-    View facility data for facility specified by id
+    View facility data for facility specified by id.
     """
 
     try:
@@ -1073,6 +1234,11 @@ def view_facility(request, id):
         return view_http_error_404(request)
 
     data = FacilitySerializer(facility, context={"user": request.user}).data
+
+    applicator = APIPermissionsApplicator(request.user)
+
+    if not applicator.is_generating_api_cache:
+        data = applicator.apply(data)
 
     if not data:
         return view_http_error_403(request)
@@ -1095,6 +1261,9 @@ def view_facility(request, id):
         .order_by("network__name")
     )
 
+    if facility.org.logo:
+        org["logo"] = facility.org.logo.url
+
     dismiss = DoNotRender()
 
     data = {
@@ -1108,6 +1277,18 @@ def view_facility(request, id):
                 "value": org.get("name", dismiss),
                 "type": "entity_link",
                 "link": "/%s/%d" % (Organization._handleref.tag, org.get("id")),
+            },
+            {
+                "name": "aka",
+                "label": _("Also Known As"),
+                "value": data.get("aka", dismiss),
+                "notify_incomplete": False,
+            },
+            {
+                "name": "name_long",
+                "label": _("Long Name"),
+                "value": data.get("name_long", dismiss),
+                "notify_incomplete": False,
             },
             {
                 "name": "website",
@@ -1126,6 +1307,16 @@ def view_facility(request, id):
                 "value": data.get("address2", dismiss),
             },
             {
+                "name": "floor",
+                "label": _("Floor"),
+                "value": data.get("floor", dismiss),
+            },
+            {
+                "name": "suite",
+                "label": _("Suite"),
+                "value": data.get("suite", dismiss),
+            },
+            {
                 "name": "location",
                 "label": _("Location"),
                 "type": "location",
@@ -1137,6 +1328,14 @@ def view_facility(request, id):
                 "data": "countries_b",
                 "label": _("Country Code"),
                 "value": data.get("country", dismiss),
+            },
+            {
+                "name": "region_continent",
+                "type": "list",
+                "data": "enum/regions",
+                "label": _("Continental Region"),
+                "value": data.get("region_continent", dismiss),
+                "readonly": True,
             },
             {
                 "name": "geocode",
@@ -1168,6 +1367,14 @@ def view_facility(request, id):
                 "value": data.get("notes", dismiss),
             },
             {
+                "name": "org_logo",
+                "label": "",
+                "value": org.get("logo", dismiss),
+                "type": "image",
+                "readonly": True,
+                "max_height": dj_settings.ORG_LOGO_MAX_VIEW_HEIGHT,
+            },
+            {
                 "type": "email",
                 "name": "tech_email",
                 "label": _("Technical Email"),
@@ -1178,6 +1385,7 @@ def view_facility(request, id):
                 "name": "tech_phone",
                 "label": _("Technical Phone"),
                 "value": data.get("tech_phone", dismiss),
+                "help_text": field_help(Facility, "tech_phone"),
             },
             {
                 "type": "email",
@@ -1190,9 +1398,40 @@ def view_facility(request, id):
                 "name": "sales_phone",
                 "label": _("Sales Phone"),
                 "value": data.get("sales_phone", dismiss),
+                "help_text": field_help(Facility, "sales_phone"),
+            },
+            {
+                "name": "property",
+                "type": "list",
+                "data": "enum/property",
+                "label": _("Property"),
+                "value": data.get("property", dismiss),
+                "help_text": field_help(Facility, "property"),
+            },
+            {
+                "name": "diverse_serving_substations",
+                "type": "list",
+                "data": "enum/bool_choice_with_opt_out_str",
+                "label": _("Diverse Serving Substations"),
+                "value": data.get("diverse_serving_substations", dismiss),
+                "value_label": dict(BOOL_CHOICE_WITH_OPT_OUT).get(
+                    data.get("diverse_serving_substations")
+                ),
+                "help_text": field_help(Facility, "diverse_serving_substations"),
+            },
+            {
+                "name": "available_voltage_services",
+                "type": "list",
+                "multiple": True,
+                "data": "enum/available_voltage",
+                "label": _("Available Voltage Services"),
+                "value": data.get("available_voltage_services", dismiss),
+                "help_text": field_help(Facility, "available_voltage_services"),
             },
         ],
     }
+
+    data["stats"] = get_fac_stats(peers, exchanges)
 
     return view_component(
         request, "facility", data, "Facility", perms=perms, instance=facility
@@ -1202,7 +1441,7 @@ def view_facility(request, id):
 @ensure_csrf_cookie
 def view_exchange(request, id):
     """
-    View exchange data for exchange specified by id
+    View exchange data for exchange specified by id.
     """
 
     try:
@@ -1211,6 +1450,11 @@ def view_exchange(request, id):
         return view_http_error_404(request)
 
     data = InternetExchangeSerializer(exchange, context={"user": request.user}).data
+
+    applicator = APIPermissionsApplicator(request.user)
+
+    if not applicator.is_generating_api_cache:
+        data = applicator.apply(data)
 
     # find out if user can write to object
     perms = export_permissions(request.user, exchange)
@@ -1234,11 +1478,19 @@ def view_exchange(request, id):
 
     org = data.get("org")
 
+    if exchange.org.logo:
+        org["logo"] = exchange.org.logo.url
+
     data = {
         "id": exchange.id,
         "title": data.get("name", dismiss),
         "facilities": facilities,
         "networks": networks,
+        "peer_count": 0,
+        "connections_count": 0,
+        "open_peer_count": 0,
+        "total_speed": 0,
+        "ipv6_percentage": 0,
         "ixlans": exchange.ixlan_set_active_or_pending,
         "fields": [
             {
@@ -1247,6 +1499,11 @@ def view_exchange(request, id):
                 "value": org.get("name", dismiss),
                 "type": "entity_link",
                 "link": "/%s/%d" % (Organization._handleref.tag, org.get("id")),
+            },
+            {
+                "name": "aka",
+                "label": _("Also Known As"),
+                "value": data.get("aka", dismiss),
             },
             {
                 "name": "name_long",
@@ -1276,25 +1533,18 @@ def view_exchange(request, id):
                 "value": data.get("media", dismiss),
             },
             {
-                "type": "flags",
-                "label": _("Protocols Supported"),
-                "value": [
-                    {
-                        "name": "proto_unicast",
-                        "label": _("Unicast IPv4"),
-                        "value": int(data.get("proto_unicast", False)),
-                    },
-                    {
-                        "name": "proto_multicast",
-                        "label": _("Multicast"),
-                        "value": int(data.get("proto_multicast", False)),
-                    },
-                    {
-                        "name": "proto_ipv6",
-                        "label": _("IPv6"),
-                        "value": int(data.get("proto_ipv6", False)),
-                    },
-                ],
+                "name": "service_level",
+                "type": "list",
+                "data": "enum/service_level_types_trunc",
+                "label": _("Service Level"),
+                "value": data.get("service_level", dismiss),
+            },
+            {
+                "name": "terms",
+                "type": "list",
+                "data": "enum/terms_types_trunc",
+                "label": _("Terms"),
+                "value": data.get("terms", dismiss),
             },
             {
                 "readonly": True,
@@ -1308,6 +1558,14 @@ def view_exchange(request, id):
                 "help_text": _("Markdown enabled"),
                 "type": "fmt-text",
                 "value": data.get("notes", dismiss),
+            },
+            {
+                "name": "org_logo",
+                "label": "",
+                "value": org.get("logo", dismiss),
+                "type": "image",
+                "readonly": True,
+                "max_height": dj_settings.ORG_LOGO_MAX_VIEW_HEIGHT,
             },
             {"type": "sub", "label": _("Contact Information")},
             {
@@ -1333,6 +1591,7 @@ def view_exchange(request, id):
                 "name": "tech_phone",
                 "label": _("Technical Phone"),
                 "value": data.get("tech_phone", dismiss),
+                "help_text": field_help(InternetExchange, "tech_phone"),
             },
             {
                 "type": "email",
@@ -1345,6 +1604,7 @@ def view_exchange(request, id):
                 "name": "policy_phone",
                 "label": _("Policy Phone"),
                 "value": data.get("policy_phone", dismiss),
+                "help_text": field_help(InternetExchange, "policy_phone"),
             },
         ],
     }
@@ -1363,11 +1623,6 @@ def view_exchange(request, id):
                 "payload": [
                     {"name": "ix_id", "value": exchange.id},
                 ],
-            },
-            {
-                "type": "flags",
-                "label": _("DOT1Q"),
-                "value": [{"name": "dot1q_support", "value": ixlan.dot1q_support}],
             },
             {
                 "type": "number",
@@ -1393,7 +1648,7 @@ def view_exchange(request, id):
                 "value": DoNotRender.permissioned(
                     ixlan.ixf_ixp_member_list_url,
                     request.user,
-                    f"{ixlan.nsp_namespace}.ixf_ixp_member_list_url"
+                    f"{ixlan.grainy_namespace}.ixf_ixp_member_list_url"
                     f".{ixlan.ixf_ixp_member_list_url_visible}",
                     explicit=True,
                 ),
@@ -1416,9 +1671,26 @@ def view_exchange(request, id):
                 ],
                 "admin": True,
             },
+            {
+                "type": "action",
+                "label": _("IX-F Import"),
+                "actions": [
+                    {
+                        "label": _("Request import"),
+                        "action": "ixf_request_import",
+                    },
+                    {
+                        "label": exchange.ixf_import_request_recent_status[1],
+                        "css": f"ixf-import-request-status {exchange.ixf_import_css}",
+                    },
+                ],
+                "admin": True,
+            },
             {"type": "group_end"},
         ]
     )
+
+    data["stats"] = get_ix_stats(networks, ixlan)
 
     return view_component(
         request, "exchange", data, "Exchange", perms=perms, instance=exchange
@@ -1447,10 +1719,17 @@ def view_network_by_asn(request, asn):
         return view_http_error_404(request)
 
 
+def format_last_updated_time(last_updated_time):
+    if last_updated_time is None:
+        return ""
+    elif isinstance(last_updated_time, str):
+        return last_updated_time.split(".")[0]
+
+
 @ensure_csrf_cookie
 def view_network(request, id):
     """
-    View network data for network specified by id
+    View network data for network specified by id.
     """
 
     try:
@@ -1461,6 +1740,10 @@ def view_network(request, id):
         return view_http_error_404(request)
 
     network_d = NetworkSerializer(network, context={"user": request.user}).data
+    applicator = APIPermissionsApplicator(request.user)
+
+    if not applicator.is_generating_api_cache:
+        network_d = applicator.apply(network_d)
 
     if not network_d:
         return view_http_error_403(request)
@@ -1492,6 +1775,9 @@ def view_network(request, id):
     ixf_proposals = IXFMemberData.proposals_for_network(network)
     ixf_proposals_dismissed = IXFMemberData.network_has_dismissed_actionable(network)
 
+    if network.org.logo:
+        org["logo"] = network.org.logo.url
+
     data = {
         "title": network_d.get("name", dismiss),
         "facilities": facilities,
@@ -1511,6 +1797,12 @@ def view_network(request, id):
                 "label": _("Also Known As"),
                 "notify_incomplete": False,
                 "value": network_d.get("aka", dismiss),
+            },
+            {
+                "name": "name_long",
+                "label": _("Long Name"),
+                "notify_incomplete": False,
+                "value": network_d.get("name_long", dismiss),
             },
             {
                 "name": "website",
@@ -1631,7 +1923,25 @@ def view_network(request, id):
                 "readonly": True,
                 "name": "updated",
                 "label": _("Last Updated"),
-                "value": network_d.get("updated", dismiss),
+                "value": format_last_updated_time(network_d.get("updated")),
+            },
+            {
+                "readonly": True,
+                "name": "netixlan_updated",
+                "label": _("Public Peering Info Updated"),
+                "value": format_last_updated_time(network_d.get("netixlan_updated")),
+            },
+            {
+                "readonly": True,
+                "name": "netfac_updated",
+                "label": _("Peering Facility Info Updated"),
+                "value": format_last_updated_time(network_d.get("netfac_updated")),
+            },
+            {
+                "readonly": True,
+                "name": "poc_updated",
+                "label": _("Contact Info Updated"),
+                "value": format_last_updated_time(network_d.get("poc_updated")),
             },
             {
                 "name": "notes",
@@ -1639,6 +1949,14 @@ def view_network(request, id):
                 "help_text": _("Markdown enabled"),
                 "type": "fmt-text",
                 "value": network_d.get("notes", dismiss),
+            },
+            {
+                "name": "org_logo",
+                "label": "",
+                "value": org.get("logo", dismiss),
+                "type": "image",
+                "readonly": True,
+                "max_height": dj_settings.ORG_LOGO_MAX_VIEW_HEIGHT,
             },
             {"type": "sub", "admin": True, "label": _("PeeringDB Configuration")},
             {
@@ -1710,6 +2028,8 @@ def view_network(request, id):
 
     # Add POC data to dataset
     data["poc_set"] = network_d.get("poc_set")
+    # For tooltip
+    data["phone_help_text"] = field_help(NetworkContact, "phone")
 
     if not request.user.is_authenticated or not request.user.is_verified_user:
         cnt = network.poc_set.filter(status="ok", visible="Users").count()
@@ -1728,13 +2048,15 @@ def view_suggest(request, reftag):
 
     template = loader.get_template(f"site/view_suggest_{reftag}.html")
     env = make_env()
+
+    env["phone_help_text"] = field_help(NetworkContact, "phone")
     return HttpResponse(template.render(env, request))
 
 
 def view_simple_content(request, content_name):
     """
-    Renders the content in templates/{{ content_name }} inside
-    the peeringdb layout
+    Render the content in templates/{{ content_name }} inside
+    the peeringdb layout.
     """
 
     template = loader.get_template("site/simple_content.html")
@@ -1746,7 +2068,7 @@ def view_simple_content(request, content_name):
 
 def view_aup(request):
     """
-    Render page containing acceptable use policy
+    Render page containing acceptable use policy.
     """
 
     return view_simple_content(request, "site/aup.html")
@@ -1754,7 +2076,7 @@ def view_aup(request):
 
 def view_about(request):
     """
-    Render page containing about
+    Render page containing about.
     """
 
     return view_simple_content(request, "site/about.html")
@@ -1762,7 +2084,7 @@ def view_about(request):
 
 def view_sponsorships(request):
     """
-    View current sponsorships
+    View current sponsorships.
     """
 
     template = loader.get_template("site/sponsorships.html")
@@ -1783,7 +2105,7 @@ def view_sponsorships(request):
 
 def view_partnerships(request):
     """
-    View current partners
+    View current partners.
     """
 
     template = loader.get_template("site/partnerships.html")
@@ -1803,7 +2125,7 @@ def view_partnerships(request):
 
 def view_advanced_search(request):
     """
-    View for advanced search
+    View for advanced search.
     """
 
     template = loader.get_template("site/advanced-search.html")
@@ -1836,23 +2158,37 @@ def view_advanced_search(request):
         except (ObjectDoesNotExist, ValueError):
             env["not_fac_name"] = ""
 
+    env["can_use_distance_filter"] = (
+        dj_settings.API_DISTANCE_FILTER_REQUIRE_AUTH is False
+        or request.user.is_authenticated
+    ) and (
+        dj_settings.API_DISTANCE_FILTER_REQUIRE_VERIFIED is False
+        or (request.user.is_authenticated and request.user.is_verified_user)
+    )
+
     return HttpResponse(template.render(env, request))
 
 
 def request_api_search(request):
+    """
+    Triggered by typing something in the main peeringdb search bar
+    without hitting enter (quasi autocomplete).
+    """
+
     q = request.GET.get("q")
 
     if not q:
         return HttpResponseBadRequest()
 
-    result = search(q)
+    result = search(q, autocomplete=True)
 
     return HttpResponse(json.dumps(result), content_type="application/json")
 
 
 def request_search(request):
     """
-    XHR search request goes here
+    Triggered by hitting enter on the main search bar.
+    Renders a search result page.
     """
     q = request.GET.get("q")
 
@@ -1870,7 +2206,7 @@ def request_search(request):
     result = search(q)
 
     sponsors = {
-        org.id: sponsorship.label.lower()
+        org.id: {"label": sponsorship.label.lower(), "css": sponsorship.css}
         for org, sponsorship in Sponsorship.active_by_org()
     }
 
@@ -1924,13 +2260,12 @@ EmailDevice.verify_token = verify_token
 class LoginView(two_factor.views.LoginView):
 
     """
-    We extend the `LoginView` class provided
-    by `two_factor` because we need to add some
-    pdb specific functionality and checks
+    Extend the `LoginView` class provided
+    by `two_factor` because some
+    PDB specific functionality and checks need to be added.
     """
 
     def get(self, *args, **kwargs):
-
         """
         If a user is already authenticated, don't show the
         login process, instead redirect to /
@@ -1941,12 +2276,13 @@ class LoginView(two_factor.views.LoginView):
 
         return super().get(*args, **kwargs)
 
-    @ratelimit(key="ip", rate=RATELIMITS["request_login_POST"], method="POST")
+    @method_decorator(
+        ratelimit(key="ip", rate=RATELIMITS["request_login_POST"], method="POST")
+    )
     def post(self, *args, **kwargs):
-
         """
         Posts to the `auth` step of the authentication
-        process need to be rate limited
+        process need to be rate limited.
         """
 
         was_limited = getattr(self.request, "limited", False)
@@ -1959,10 +2295,9 @@ class LoginView(two_factor.views.LoginView):
         return super().post(*args, **kwargs)
 
     def get_context_data(self, form, **kwargs):
-
         """
         If post request was rate limited the rate limit message
-        needs to be communicated via the template context
+        needs to be communicated via the template context.
         """
 
         context = super().get_context_data(form, **kwargs)
@@ -1974,9 +2309,8 @@ class LoginView(two_factor.views.LoginView):
         return context
 
     def get_email_device(self):
-
         """
-        Returns an EmailDevice instance for the requesting user
+        Return an EmailDevice instance for the requesting user
         which can be used for one time passwords.
         """
 
@@ -2024,10 +2358,9 @@ class LoginView(two_factor.views.LoginView):
         return None
 
     def get_device(self, step=None):
-
         """
-        We override this so we can enable EmailDevice as a
-        challenge device for one time passwords
+        Override this to can enable EmailDevice as a
+        challenge device for one time passwords.
         """
 
         if not self.device_cache:
@@ -2044,9 +2377,8 @@ class LoginView(two_factor.views.LoginView):
         return self.get_redirect_url()
 
     def get_redirect_url(self):
-
         """
-        Specifies which redirect urls are valid
+        Specify which redirect urls are valid.
         """
 
         redir = self.request.POST.get("next") or "/"
@@ -2076,9 +2408,8 @@ class LoginView(two_factor.views.LoginView):
         return redir
 
     def done(self, form_list, **kwargs):
-
         """
-        User authenticated successfully, set language options
+        User authenticated successfully, set language options.
         """
 
         response = super().done(form_list, **kwargs)
@@ -2087,9 +2418,10 @@ class LoginView(two_factor.views.LoginView):
 
         user_language = self.get_user().get_locale()
         translation.activate(user_language)
-        self.request.session[translation.LANGUAGE_SESSION_KEY] = user_language
+        response = redirect(self.get_success_url())
+        response.set_cookie(dj_settings.LANGUAGE_COOKIE_NAME, user_language)
 
-        return redirect(self.get_success_url())
+        return response
 
 
 @require_http_methods(["POST"])
@@ -2118,7 +2450,7 @@ def request_translation(request, data_type):
         }
         reply = requests.post(translationURL, params=call_params).json()
 
-        if not "data" in reply:
+        if "data" not in reply:
             return JsonResponse({"status": request.POST, "error": reply})
 
         return JsonResponse(
@@ -2134,7 +2466,7 @@ def request_translation(request, data_type):
 def network_reset_ixf_proposals(request, net_id):
     net = Network.objects.get(id=net_id)
 
-    allowed = has_perms(request.user, net, PERM_CRUD)
+    allowed = check_permissions(request.user, net, PERM_CRUD)
 
     if not allowed:
         return JsonResponse({"non_field_errors": [_("Permission denied")]}, status=401)
@@ -2150,7 +2482,7 @@ def network_dismiss_ixf_proposal(request, net_id, ixf_id):
     ixf_member_data = IXFMemberData.objects.get(id=ixf_id)
     net = ixf_member_data.net
 
-    allowed = has_perms(request.user, net, PERM_CRUD)
+    allowed = check_permissions(request.user, net, PERM_CRUD)
 
     if not allowed:
         return JsonResponse({"non_field_errors": [_("Permission denied")]}, status=401)

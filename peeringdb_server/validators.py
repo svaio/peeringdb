@@ -1,16 +1,31 @@
 """
 peeringdb model / field validators
 """
-import re
 import ipaddress
-import phonenumbers
+import re
 
+import phonenumbers
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils.translation import ugettext_lazy as _
 
-from peeringdb_server.inet import network_is_pdb_valid, IRR_SOURCE
 import peeringdb_server.models
+from peeringdb_server.inet import IRR_SOURCE, network_is_pdb_valid
+from peeringdb_server.request import bypass_validation
+
+
+def validate_poc_visible(visible):
+
+    # we no longer allow "Private" network contacts
+    # however until all private network contacts have
+    # been either changed or deleted we cannot remove
+    # the value from the choices set for the field
+    #
+    # for now we handle validation here (see #944)
+
+    if visible == "Private":
+        raise ValidationError(_("Private contacts are no longer supported."))
+    return visible
 
 
 def validate_phonenumber(phonenumber, country=None):
@@ -37,7 +52,7 @@ def validate_phonenumber(phonenumber, country=None):
             parsed_number, phonenumbers.PhoneNumberFormat.E164
         )
         return f"{validated_number}"
-    except phonenumbers.phonenumberutil.NumberParseException as exc:
+    except phonenumbers.phonenumberutil.NumberParseException:
         raise ValidationError(_("Not a valid phone number (E.164)"))
 
 
@@ -67,7 +82,7 @@ def validate_zipcode(zipcode, country):
 
 def validate_prefix(prefix):
     """
-    validate ip prefix
+    Validate ip prefix.
 
     Arguments:
         - prefix: ipaddress.IPv4Network or an ipaddress.IPv6Network
@@ -82,14 +97,14 @@ def validate_prefix(prefix):
     if isinstance(prefix, str):
         try:
             prefix = ipaddress.ip_network(prefix)
-        except ValueError as exc:
+        except ValueError:
             raise ValidationError(_("Invalid prefix: {}").format(prefix))
     return prefix
 
 
 def validate_address_space(prefix):
     """
-    validate an ip prefix according to peeringdb specs
+    Validate an ip prefix according to peeringdb specs.
 
     Arguments:
         - prefix: ipaddress.IPv4Network or an ipaddress.IPv6Network
@@ -102,6 +117,10 @@ def validate_address_space(prefix):
 
     if not network_is_pdb_valid(prefix):
         raise ValidationError(_("Address space invalid: {}").format(prefix))
+
+    # bypass validation according to #741
+    if bypass_validation():
+        return
 
     prefixlen_min = getattr(settings, f"DATA_QUALITY_MIN_PREFIXLEN_V{prefix.version}")
     prefixlen_max = getattr(settings, f"DATA_QUALITY_MAX_PREFIXLEN_V{prefix.version}")
@@ -119,20 +138,36 @@ def validate_address_space(prefix):
 def validate_info_prefixes4(value):
     if not value:
         value = 0
+
+    if value < 0:
+        raise ValidationError(_("Negative value not allowed"))
+
+    # bypass validation according to #741
+    if bypass_validation():
+        return value
+
     if value > settings.DATA_QUALITY_MAX_PREFIX_V4_LIMIT:
         raise ValidationError(
             _("Maximum value allowed {}").format(
                 settings.DATA_QUALITY_MAX_PREFIX_V4_LIMIT
             )
         )
-    if value < 0:
-        raise ValidationError(_("Negative value not allowed"))
+
     return value
 
 
 def validate_info_prefixes6(value):
+
     if not value:
         value = 0
+
+    if value < 0:
+        raise ValidationError(_("Negative value not allowed"))
+
+    # bypass validation according to #741
+    if bypass_validation():
+        return value
+
     if value > settings.DATA_QUALITY_MAX_PREFIX_V6_LIMIT:
         raise ValidationError(
             _("Maximum value allowed {}").format(
@@ -140,15 +175,13 @@ def validate_info_prefixes6(value):
             )
         )
 
-    if value < 0:
-        raise ValidationError(_("Negative value not allowed"))
     return value
 
 
 def validate_prefix_overlap(prefix):
     """
-    validate that a prefix does not overlap with another prefix
-    on an already existing ixlan
+    Validate that a prefix does not overlap with another prefix
+    on an already existing ixlan.
 
     Arguments:
         - prefix: ipaddress.IPv4Network or an ipaddress.IPv6Network
@@ -175,7 +208,7 @@ def validate_prefix_overlap(prefix):
 
 def validate_irr_as_set(value):
     """
-    Validates irr as-set string
+    Validate irr as-set string.
 
     - the as-set/rs-set name has to conform to RFC 2622 (5.1 and 5.2)
     - the source may be specified by AS-SET@SOURCE or SOURCE::AS-SET
@@ -236,7 +269,11 @@ def validate_irr_as_set(value):
         # validate set name and as hierarchy
         as_parts = as_set.split(":")
 
-        if len(as_parts) > settings.DATA_QUALITY_MAX_IRR_DEPTH:
+        # validate max depth (superusers are allowed to bypass this validation, see #741)
+        if (
+            len(as_parts) > settings.DATA_QUALITY_MAX_IRR_DEPTH
+            and not bypass_validation()
+        ):
             raise ValidationError(
                 _("Maximum AS-SET hierarchy depth: {}").format(
                     settings.DATA_QUALITY_MAX_IRR_DEPTH
@@ -244,7 +281,6 @@ def validate_irr_as_set(value):
             )
 
         set_found = False
-        typ = None
         types = []
 
         for part in as_parts:

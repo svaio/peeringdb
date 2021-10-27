@@ -1,18 +1,17 @@
-import os
 import json
-import pytest
+import os
 import urllib
 
-from django.test import Client, TestCase, RequestFactory
+import pytest
 from django.contrib.auth.models import Group
-from django.urls import reverse, resolve
-from django.core.management import call_command
 from django.contrib.messages import get_messages
+from django.core.management import call_command
+from django.test import Client, RequestFactory, TestCase
+from django.urls import resolve, reverse
+from django_grainy.models import GroupPermission, UserPermission
 
-import django_namespace_perms as nsp
-
-import peeringdb_server.models as models
 import peeringdb_server.admin as admin
+import peeringdb_server.models as models
 
 
 class AdminTests(TestCase):
@@ -81,8 +80,8 @@ class AdminTests(TestCase):
         )
         readonly_group = Group.objects.create(name="readonly")
         for app_label in admin.PERMISSION_APP_LABELS:
-            nsp.models.GroupPermission.objects.create(
-                group=readonly_group, namespace=app_label, permissions=0x01
+            GroupPermission.objects.create(
+                group=readonly_group, namespace=app_label, permission=0x01
             )
         readonly_group.user_set.add(cls.readonly_admin)
 
@@ -383,44 +382,6 @@ class AdminTests(TestCase):
         assert netixlan.ipaddr4 is None
         assert "Ip address already exists elsewhere" in response.content.decode("utf-8")
 
-    def test_validate_netixlan_speed(self):
-        ixlan = self.entities["ixlan"][0]
-        netixlan = ixlan.netixlan_set.first()
-
-        url = reverse(
-            "admin:{}_{}_change".format(
-                netixlan._meta.app_label,
-                netixlan._meta.object_name,
-            ).lower(),
-            args=(netixlan.id,),
-        )
-        original_speed = netixlan.speed
-        data = {
-            "status": netixlan.status,
-            "asn": netixlan.asn,
-            "ipaddr4": netixlan.ipaddr4,
-            "ipaddr6": "",
-            "notes": netixlan.notes,
-            "speed": 1200000,
-            "operational": netixlan.operational,
-            "network": netixlan.network_id,
-            "ixlan": netixlan.ixlan_id,
-            "_save": "Save",
-        }
-        client = Client()
-        client.force_login(self.admin_user)
-
-        response = client.post(url, data)
-        netixlan.refresh_from_db()
-        assert "Maximum speed: 1T" in response.content.decode("utf-8")
-        assert netixlan.speed == original_speed
-
-        data["speed"] = 10
-        response = client.post(url, data)
-        netixlan.refresh_from_db()
-        assert "Minimum speed: 100M" in response.content.decode("utf-8")
-        assert netixlan.speed == original_speed
-
     def _run_regex_search(self, model, search_term):
         c = Client()
         c.login(username="admin", password="admin")
@@ -652,6 +613,28 @@ class AdminTests(TestCase):
         assert response.status_code == kwargs.get("status_add", 200)
         if response.status_code == 200:
             assert search_str in cont
+
+    def _test_custom_result_length(self, sz):
+        user = self.admin_user
+        client = Client()
+        client.force_login(user)
+
+        assert user.is_staff
+
+        cls = models.Organization
+        url = reverse(
+            "admin:{}_{}_changelist".format(
+                cls._meta.app_label, cls._meta.object_name
+            ).lower(),
+        )
+        response = client.get(f"{url}?sz={sz}")
+        cont = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert cont.count('class="action-checkbox"') == sz
+
+    def test_custom_result_length(self):
+        self._test_custom_result_length(1)
+        self._test_custom_result_length(3)
 
     def test_grappelli_autocomplete(self):
         """

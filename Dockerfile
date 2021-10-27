@@ -1,4 +1,7 @@
-FROM python:3.7-alpine as base
+# RUN true is used here to separate problematic COPY statements,
+# per this issue: https://github.com/moby/moby/issues/37965
+
+FROM python:3.9-alpine as base
 
 ARG virtual_env=/srv/www.peeringdb.com/venv
 
@@ -9,25 +12,30 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # build container
 FROM base as builder
 
+# rust and cargo for cryptography package
 RUN apk --update --no-cache add \
   g++ \
+  freetype-dev \
   libjpeg-turbo-dev \
   linux-headers \
   make \
   mariadb-dev \
-  libffi-dev
+  libffi-dev \
+  curl \
+  rust \
+  cargo
 
-# create venv
-RUN pip install -U pip pipenv
-RUN python3 -m venv "$VIRTUAL_ENV"
+RUN pip install -U pip poetry
+# create venv and update venv pip
+RUN python3 -m venv "$VIRTUAL_ENV" && pip install -U pip
 
 WORKDIR /srv/www.peeringdb.com
-ADD Pipfile* ./
-RUN pipenv install --ignore-pipfile
+COPY poetry.lock pyproject.toml ./
+# install dev now so we don't need a build env for testing (adds 8M)
+RUN poetry install --no-root
 
 # inetd
 RUN apk add busybox-extras
-
 
 #### final image here
 
@@ -39,7 +47,7 @@ ARG uid=996
 ARG ADD_SETTINGS_FILE=mainsite/settings/dev.py
 
 # add dependencies
-RUN apk add gettext libjpeg-turbo mariadb-connector-c
+RUN apk add --no-cache freetype ttf-freefont gettext libjpeg-turbo graphviz mariadb-connector-c libgcc
 
 RUN adduser -Du $uid pdb
 
@@ -53,17 +61,20 @@ COPY in.whoisd .
 COPY Ctl/VERSION etc
 COPY docs/ docs
 COPY mainsite/ mainsite
+RUN true
 COPY $ADD_SETTINGS_FILE mainsite/settings/
+RUN true
 COPY peeringdb_server/ peeringdb_server
 COPY fixtures/ fixtures
 COPY .coveragerc .coveragerc
-RUN mkdir coverage 
+RUN mkdir coverage
 
 COPY scripts/manage /usr/bin/
 COPY Ctl/docker/entrypoint.sh /
 
 # inetd for whois
 COPY --from=builder /usr/sbin/inetd /usr/sbin/
+RUN true
 COPY Ctl/docker/inetd.conf /etc/
 
 RUN chown -R pdb:pdb api-cache locale media var/log coverage
@@ -72,17 +83,15 @@ RUN chown -R pdb:pdb api-cache locale media var/log coverage
 FROM final as tester
 
 WORKDIR /srv/www.peeringdb.com
-# copy from builder in case we're testing new deps
-COPY --from=builder /srv/www.peeringdb.com/Pipfile* ./
+COPY poetry.lock pyproject.toml ./
+RUN true
 COPY tests/ tests
 RUN chown -R pdb:pdb tests/
 COPY Ctl/docker/entrypoint.sh .
 
-RUN pip install -U pipenv
-RUN pipenv install --dev --ignore-pipfile -v
-#RUN echo `which python`
-#RUN pip freeze
-#RUN pytest -v -rA --cov-report term-missing --cov=peeringdb_server tests/
+# install dev deps
+RUN pip install -U poetry
+RUN poetry install --no-root
 
 USER pdb
 ENTRYPOINT ["./entrypoint.sh"]
@@ -92,6 +101,7 @@ CMD ["runserver", "$RUNSERVER_BIND"]
 FROM final
 
 COPY Ctl/docker/entrypoint.sh .
+RUN true
 COPY Ctl/docker/django-uwsgi.ini etc/
 
 ENV UWSGI_SOCKET="127.0.0.1:7002"

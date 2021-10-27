@@ -1,20 +1,19 @@
-import re
+"""
+peeringdb sync backend to use for pdb_load_data
+command
+"""
 
+import re
 from collections import defaultdict
 
-from django.db.models import OneToOneRel, DateTimeField
 from django.core.exceptions import ValidationError
-from django.conf import settings
 from django.db import IntegrityError
-
-from peeringdb import resource
+from django.db.models import OneToOneRel
+from django_peeringdb.client_adaptor.backend import Backend as BaseBackend
+from django_peeringdb.client_adaptor.backend import reftag_to_cls
 
 import peeringdb_server.models as models
-
-from django_peeringdb.client_adaptor.backend import (
-    Backend as BaseBackend,
-    reftag_to_cls,
-)
+from peeringdb import resource
 
 __version__ = "1.0"
 
@@ -104,9 +103,16 @@ class Backend(BaseBackend):
         - ipaddr6 out of prefix address space on netixlans (skip validation)
         """
 
-        obj.updated = obj._meta.get_field("updated").to_python(obj.updated).replace(tzinfo=models.UTC())
-        obj.created = obj._meta.get_field("created").to_python(obj.created).replace(tzinfo=models.UTC())
-
+        obj.updated = (
+            obj._meta.get_field("updated")
+            .to_python(obj.updated)
+            .replace(tzinfo=models.UTC())
+        )
+        obj.created = (
+            obj._meta.get_field("created")
+            .to_python(obj.created)
+            .replace(tzinfo=models.UTC())
+        )
 
     def save(self, obj):
 
@@ -121,7 +127,6 @@ class Backend(BaseBackend):
                     value = field.to_python(value)
                 value = value.replace(tzinfo=models.UTC())
                 setattr(obj, field.name, value)
-
 
         if obj.HandleRef.tag == "ix":
             obj.save(create_ixlan=False)

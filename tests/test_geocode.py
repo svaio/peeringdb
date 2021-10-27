@@ -1,85 +1,201 @@
-import pytest
 import json
-import uuid
-import re
-import io
+import os
 
-from django.test import Client, TestCase, RequestFactory
-from django.contrib.auth.models import Group, AnonymousUser
-from django.contrib.auth import get_user
-from django.core.management import call_command
+import googlemaps
+import pytest
+from django.core.exceptions import ValidationError
 
-import django_namespace_perms as nsp
-
+import peeringdb_server.geo as geo
 import peeringdb_server.models as models
+from peeringdb_server.serializers import GeocodeSerializerMixin
 
 
-class ViewTestCase(TestCase):
-    @classmethod
-    def setUpTestData(cls):
+class MockMelissa(geo.Melissa):
+    def __init__(self):
+        super().__init__("")
 
-        # create organizations
-        cls.organizations = {
-            k: models.Organization.objects.create(
-                name="Geocode Org %s" % k, status="ok"
-            )
-            for k in ["a", "b", "c", "d"]
+    def global_address(self, **kwargs):
+
+        return {
+            "Records": [
+                {
+                    "Results": "AV25",
+                    "FormattedAddress": "address 1;address 2;city",
+                    "AdministrativeArea": "state",
+                    "AddressLine1": "address 1",
+                    "AddressLine2": "address 2",
+                    "Locality": "city",
+                    "PostalCode": "12345",
+                    "Latitude": 1.234567,
+                    "Longitude": 1.234567,
+                }
+            ]
         }
 
-        # create facilities
-        cls.facilities = {
-            k: models.Facility.objects.create(
-                name=f"Geocode Fac {k}",
-                status="ok",
-                org=cls.organizations[k],
-                address1="Some street",
-                address2=k,
-                city="Chicago",
-                country="US",
-                state="IL",
-                zipcode="1234",
-                latitude=1.23,
-                longitude=-1.23,
-                geocode_status=True,
-            )
-            for k in ["a", "b", "c", "d"]
-        }
 
-    def test_base(self):
-        self.assertEqual(
-            self.facilities["a"].geocode_address, "Some street a, Chicago, IL 1234"
+@pytest.fixture
+def org():
+    org = models.Organization(name="Geocode Org", status="ok")
+    return org
+
+
+@pytest.fixture
+def fac():
+    fac = models.Facility(
+        name="Geocode Fac",
+        status="ok",
+        address1="Some street",
+        address2="",
+        city="Chicago",
+        country="US",
+        state="IL",
+        zipcode="1234",
+    )
+    return fac
+
+
+def load_json(filename):
+    with open(
+        os.path.join(
+            os.path.dirname(__file__),
+            "data",
+            "geo",
+            f"{filename}.json",
+        ),
+    ) as fh:
+        json_data = json.load(fh)
+    return json_data
+
+
+def test_geo_model_defaults(fac):
+    assert fac.geocode_status is False
+    assert fac.geocode_date is None
+
+
+def test_geo_model_geocode_coordinates(fac):
+    assert fac.geocode_coordinates is None
+    fac.latitude = 41.876212
+    fac.longitude = -87.631453
+    assert fac.geocode_coordinates == (41.876212, -87.631453)
+
+
+def test_geo_model_geocode_addresss(fac):
+    assert fac.geocode_address == "Some street , Chicago, IL 1234"
+
+
+def test_need_address_suggestion(fac):
+    suggested_address = {
+        "name": "Geocode Fac",
+        "status": "ok",
+        "address1": "New street",
+        "address2": "",
+        "city": "New York",
+        "country": "US",
+        "state": "NY",
+        "zipcode": "1234",
+    }
+    geocodeserializer = GeocodeSerializerMixin()
+    assert geocodeserializer.needs_address_suggestion(suggested_address, fac)
+
+
+def test_does_not_need_address_suggestion(fac):
+    suggested_address = {
+        "name": "Geocode Fac",
+        "status": "ok",
+        "address1": "Some street",
+        "address2": "",
+        "city": "Chicago",
+        "country": "US",
+        "state": "IL",
+        "zipcode": "1234",
+    }
+    geocodeserializer = GeocodeSerializerMixin()
+    assert geocodeserializer.needs_address_suggestion(suggested_address, fac) is False
+
+
+def test_melissa_global_address_params():
+    client = geo.Melissa("")
+
+    expected = {
+        "a1": "address 1",
+        "a2": "address 2",
+        "ctry": "us",
+        "loc": "city",
+        "postal": "12345",
+    }
+
+    assert (
+        client.global_address_params(
+            address1="address 1",
+            address2="address 2",
+            country="us",
+            city="city",
+            zipcode="12345",
         )
-        self.assertEqual(self.facilities["a"].geocode_coordinates, (1.23, -1.23))
+        == expected
+    )
 
-    def test_change(self):
-        self.assertEqual(self.facilities["b"].geocode_status, True)
-        self.facilities["b"].address1 = "Another street b"
-        self.facilities["b"].save()
-        self.assertEqual(self.facilities["b"].geocode_status, False)
-        self.assertEqual(self.facilities["c"].geocode_status, True)
-        self.facilities["c"].lat = 4567.0
-        self.facilities["c"].save()
-        self.assertEqual(self.facilities["c"].geocode_status, True)
-        self.assertEqual(self.facilities["d"].geocode_status, True)
-        self.facilities["d"].website = "http://www.test.com"
-        self.facilities["d"].save()
-        self.assertEqual(self.facilities["d"].geocode_status, True)
 
-    def test_command(self):
-        self.assertEqual(self.facilities["a"].geocode_status, True)
+def test_melissa_global_address_best_result():
+    client = geo.Melissa("")
 
-        # change address to flag facility for geocoding
+    expected = {"Results": "AV25", "Address1": "value1"}
 
-        self.facilities["a"].address1 = "Another street a"
+    result = {"Records": [expected, {"Results": "AV25", "Address1": "value2"}]}
 
-        # test unicode output from command by adding special characters
-        # to the new address
+    assert client.global_address_best_result(result) == expected
+    assert client.global_address_best_result({}) == None
+    assert client.global_address_best_result(None) == None
 
-        self.facilities["a"].name = "sdílených služeb"
-        self.facilities["a"].save()
+    result = {"Records": [{"Results": "AV12", "Address1": "value2"}]}
 
-        out = io.StringIO()
-        call_command("pdb_geosync", "fac", limit=1, stdout=out)
-        out = out.getvalue()
+    assert client.global_address_best_result(result) == None
 
-        assert "[fac 1/1 ID:{}]".format(self.facilities["a"].id) in out
+
+def test_melissa_apply_global_address():
+
+    client = geo.Melissa("")
+
+    data = client.apply_global_address(
+        {
+            "address1": "address1 old",
+            "city": "city old",
+            "zipcode": "zipcode old",
+        },
+        {
+            "Results": "AV25",
+            "FormattedAddress": "address1 new;address2 new",
+            "AdministrativeArea": "state new",
+            "AddressLine1": "address1 new",
+            "AddressLine2": "address2 new",
+            "Latitude": 1.234567,
+            "Longitude": 1.234567,
+            "PostalCode": "zipcode new",
+            "Locality": "city new",
+        },
+    )
+
+    expected = {
+        "address1": "address1 new",
+        "address2": "address2 new",
+        "city": "city new",
+        "zipcode": "zipcode new",
+        "longitude": 1.234567,
+        "latitude": 1.234567,
+        "state": "state new",
+    }
+
+    assert data == expected
+
+
+def test_melissa_sanitize(fac):
+
+    client = MockMelissa()
+
+    sanitized = client.sanitize_address_model(fac)
+
+    assert sanitized["address1"] == "address 1"
+    assert sanitized["city"] == "city"
+    assert sanitized["latitude"] == 1.234567
+    assert sanitized["longitude"] == 1.234567
+    assert sanitized["zipcode"] == "12345"

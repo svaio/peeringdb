@@ -1,15 +1,13 @@
 import json
-import pytest
 
-from django.test import TestCase
+import pytest
+import reversion
+from django.conf import settings
 from django.contrib.auth.models import Group
 from django.db import IntegrityError
-from django.conf import settings
+from django.test import TestCase
 
 import peeringdb_server.models as models
-
-import reversion
-
 
 
 class VeriQueueTests(TestCase):
@@ -29,7 +27,6 @@ class VeriQueueTests(TestCase):
 
         settings.USER_GROUP_ID = cls.user_group.id
         settings.GUEST_GROUP_ID = cls.guest_group.id
-
 
         cls.inst = {}
         org = models.Organization.objects.create(name="Test", status="pending")
@@ -75,7 +72,9 @@ class VeriQueueTests(TestCase):
             vqi.user = user
             vqi.save()
             self.assertEqual(
-                qs.filter(subject=f"[{settings.RELEASE_ENV}] {vqi.content_type} - {inst}").exists(),
+                qs.filter(
+                    subject=f"[{settings.RELEASE_ENV}] {vqi.content_type} - {inst}"
+                ).exists(),
                 True,
             )
 

@@ -1,13 +1,16 @@
+"""
+Command line whois.
+"""
 import logging
 
-from ._db_command import CommandError, DBCommand
-
 from django.contrib.auth.models import AnonymousUser
+from django_handleref import util
 
 from peeringdb.whois import WhoisFormat
-from peeringdb_server import models
-from peeringdb_server import serializers
-from django_handleref import util
+from peeringdb_server import models, serializers
+from peeringdb_server.util import APIPermissionsApplicator
+
+from ._db_command import DBCommand
 
 
 class Command(DBCommand):
@@ -29,7 +32,7 @@ class Command(DBCommand):
             log.error("Unknown query type '%s'" % (args))
             return
             # TODO
-            raise CommandError("unk query")
+            # raise CommandError("unk query")
 
         model = None
 
@@ -56,5 +59,7 @@ class Command(DBCommand):
             raise ValueError(msg)
 
         data = Serializer(obj, context={"user": AnonymousUser()}).data
+        applicator = APIPermissionsApplicator(AnonymousUser())
+        data = applicator.apply(data)
         fmt = WhoisFormat()
         fmt.print(obj._handleref.tag, data)

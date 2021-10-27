@@ -1,25 +1,27 @@
 """
 Test peeringdb data export views
 """
-import os
-import pytest
-import json
 import difflib
+import json
+import os
 import re
 
+import pytest
+import reversion
+from django.core.management import call_command
 from django.test import Client
 
-from .util import ClientCase
-
 from peeringdb_server.models import (
-    Organization,
-    Network,
-    InternetExchange,
     Facility,
+    InternetExchange,
+    IXLan,
+    Network,
     NetworkFacility,
     NetworkIXLan,
-    IXLan,
+    Organization,
 )
+
+from .util import ClientCase
 
 
 class AdvancedSearchExportTest(ClientCase):
@@ -93,27 +95,32 @@ class AdvancedSearchExportTest(ClientCase):
         ]
 
         # create network facility relationships
-        cls.netfac = [
-            NetworkFacility.objects.create(
-                network=cls.net[i - 1], facility=cls.fac[i - 1], status="ok"
-            )
-            for i in entity_count
-        ]
+        with reversion.create_revision():
+            cls.netfac = [
+                NetworkFacility.objects.create(
+                    network=cls.net[i - 1], facility=cls.fac[i - 1], status="ok"
+                )
+                for i in entity_count
+            ]
 
         # create ixlans
-        cls.ixlan = [ix.ixlan for ix in cls.ix]
+        with reversion.create_revision():
+            cls.ixlan = [ix.ixlan for ix in cls.ix]
 
         # create netixlans
-        cls.netixlan = [
-            NetworkIXLan.objects.create(
-                ixlan=cls.ixlan[i - 1],
-                network=cls.net[i - 1],
-                asn=i,
-                speed=0,
-                status="ok",
-            )
-            for i in entity_count
-        ]
+        with reversion.create_revision():
+            cls.netixlan = [
+                NetworkIXLan.objects.create(
+                    ixlan=cls.ixlan[i - 1],
+                    network=cls.net[i - 1],
+                    asn=i,
+                    speed=0,
+                    status="ok",
+                )
+                for i in entity_count
+            ]
+
+        call_command("rebuild_index", "--noinput")
 
     def expected_data(self, tag, fmt):
         path = os.path.join(
@@ -128,7 +135,7 @@ class AdvancedSearchExportTest(ClientCase):
         return data
 
     def test_export_net_json(self):
-        """ test json export of network search """
+        """test json export of network search"""
         client = Client()
         response = client.get("/export/advanced-search/net/json?name_search=Network")
         assert json.loads(response.content) == json.loads(
@@ -136,7 +143,7 @@ class AdvancedSearchExportTest(ClientCase):
         )
 
     def test_export_net_json_pretty(self):
-        """ test pretty json export of network search """
+        """test pretty json export of network search"""
         client = Client()
         response = client.get(
             "/export/advanced-search/net/json-pretty?name_search=Network"
@@ -151,7 +158,7 @@ class AdvancedSearchExportTest(ClientCase):
         assert len(re.findall(r"\n  ", response.content.decode("utf-8"))) > 0
 
     def test_export_net_csv(self):
-        """ test csv export of network search """
+        """test csv export of network search"""
         client = Client()
         response = client.get("/export/advanced-search/net/csv?name_search=Network")
         assert response.content.decode("utf-8").replace(
@@ -159,20 +166,18 @@ class AdvancedSearchExportTest(ClientCase):
         ).rstrip() == self.expected_data("net", "csv")
 
     def test_export_fac_json(self):
-        """ test json export of facility search """
+        """test json export of facility search"""
         client = Client()
-        response = client.get(
-            "/export/advanced-search/fac/json?name__contains=Facility"
-        )
+        response = client.get("/export/advanced-search/fac/json?name_search=Facility")
         assert json.loads(response.content) == json.loads(
             self.expected_data("fac", "json")
         )
 
     def test_export_fac_json_pretty(self):
-        """ test pretty json export of facility search """
+        """test pretty json export of facility search"""
         client = Client()
         response = client.get(
-            "/export/advanced-search/fac/json-pretty?name__contains=Facility"
+            "/export/advanced-search/fac/json-pretty?name_search=Facility"
         )
 
         assert json.loads(response.content) == json.loads(
@@ -184,27 +189,27 @@ class AdvancedSearchExportTest(ClientCase):
         assert len(re.findall(r"\n  ", response.content.decode("utf-8"))) > 0
 
     def test_export_fac_csv(self):
-        """ test csv export of facility search """
+        """test csv export of facility search"""
         client = Client()
-        response = client.get("/export/advanced-search/fac/csv?name__contains=Facility")
+        response = client.get("/export/advanced-search/fac/csv?name_search=Facility")
 
         assert response.content.decode("utf-8").replace(
             "\r\n", "\n"
         ).rstrip() == self.expected_data("fac", "csv")
 
     def test_export_ix_json(self):
-        """ test json export of exchange search """
+        """test json export of exchange search"""
         client = Client()
-        response = client.get("/export/advanced-search/ix/json?name__contains=Exchange")
+        response = client.get("/export/advanced-search/ix/json?name_search=Exchange")
         self.assertEqual(
             json.loads(response.content), json.loads(self.expected_data("ix", "json"))
         )
 
     def test_export_ix_json_pretty(self):
-        """ test pretty json export of exchange search """
+        """test pretty json export of exchange search"""
         client = Client()
         response = client.get(
-            "/export/advanced-search/ix/json-pretty?name__contains=Exchange"
+            "/export/advanced-search/ix/json-pretty?name_search=Exchange"
         )
 
         assert json.loads(response.content) == json.loads(
@@ -216,15 +221,15 @@ class AdvancedSearchExportTest(ClientCase):
         assert len(re.findall(r"\n  ", response.content.decode("utf-8"))) > 0
 
     def test_export_ix_csv(self):
-        """ test csv export of exchange search """
+        """test csv export of exchange search"""
         client = Client()
-        response = client.get("/export/advanced-search/ix/csv?name__contains=Exchange")
+        response = client.get("/export/advanced-search/ix/csv?name_search=Exchange")
         assert response.content.decode("utf-8").replace(
             "\r\n", "\n"
         ).rstrip() == self.expected_data("ix", "csv")
 
     def test_export_org_json(self):
-        """ test json export of organization search """
+        """test json export of organization search"""
         client = Client()
         response = client.get(
             "/export/advanced-search/org/json?name_search=Organization"
@@ -234,7 +239,7 @@ class AdvancedSearchExportTest(ClientCase):
         )
 
     def test_export_org_json_pretty(self):
-        """ test pretty json export of organization search """
+        """test pretty json export of organization search"""
         client = Client()
         response = client.get(
             "/export/advanced-search/org/json-pretty?name_search=Organization"
@@ -249,7 +254,7 @@ class AdvancedSearchExportTest(ClientCase):
         assert len(re.findall(r"\n  ", response.content.decode("utf-8"))) > 0
 
     def test_export_org_csv(self):
-        """ test csv export of organization search """
+        """test csv export of organization search"""
         client = Client()
         response = client.get(
             "/export/advanced-search/org/csv?name_search=Organization"

@@ -1,11 +1,12 @@
 import pytest
-from django.test import Client
 from django.core.management import call_command
+from django.test import Client
+
 from peeringdb_server.models import (
-    User,
     Organization,
     Sponsorship,
     SponsorshipOrganization,
+    User,
 )
 
 
@@ -28,6 +29,7 @@ from peeringdb_server.models import (
         "POLICY_CONTRACTS",
         "REGIONS",
         "POC_ROLES",
+        "POC_VISIBILITY",
         "MEDIA",
         "PROTOCOLS",
         "ORG_GROUPS",
@@ -82,3 +84,32 @@ def test_generic(name, user, count, status):
     assert response.status_code == status
     if status == 200:
         assert len(response.json()[name]) >= count
+
+
+@pytest.mark.django_db
+def test_my_organizations():
+    call_command("pdb_generate_test_data", limit=3, commit=True)
+
+    org = Organization.objects.first()
+    _user = User.objects.create_user(
+        username="user_a", password="user_a", email="user_a@localhost"
+    )
+    org.usergroup.user_set.add(_user)
+
+    client = Client()
+    client.login(username="user_a", password="user_a")
+    response = client.get("/data/my_organizations")
+
+    assert response.status_code == 200
+    assert len(response.json()["my_organizations"]) == 1
+
+
+@pytest.mark.django_db
+def test_my_organizations_anon():
+    call_command("pdb_generate_test_data", limit=3, commit=True)
+
+    client = Client()
+    response = client.get("/data/my_organizations")
+
+    assert response.status_code == 200
+    assert len(response.json()["my_organizations"]) == 0

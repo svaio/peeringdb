@@ -1,14 +1,18 @@
-from django.core.management.base import BaseCommand
+"""
+Regen the api cache files.
+"""
+import datetime
 import os
+import time
 import traceback
+
+from django.conf import settings
+from django.core.management.base import BaseCommand
+from rest_framework.test import APIRequestFactory
+
 import peeringdb_server.models as pdbm
 import peeringdb_server.rest as pdbr
-import datetime
-import time
 from peeringdb_server.renderers import MetaJSONRenderer
-from django.conf import settings
-from optparse import make_option
-from rest_framework.test import APIRequestFactory
 
 MODELS = [
     pdbm.Organization,
@@ -64,6 +68,11 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         only = options.get("only", None)
         date = options.get("date", None)
+
+        # temporary setting to indicate api-cache is being generated
+        # this forced api responses to be generated without permission
+        # checks
+        settings.GENERATING_API_CACHE = True
 
         if only:
             only = only.split(",")

@@ -80,10 +80,20 @@ twentyc.editable.error = {
   humanize : function(errorType) {
     switch(errorType) {
       case "ValidationErrors":
-        return gettext("Some of the fields contain invalid values - please correct and try again."); ///
+        return gettext("Some of the fields contain invalid values - please correct and try again.");
       break;
+      case "Http403":
+        return gettext("Permission denied");
+      case "Http400":
+        return gettext("Bad request");
+      case "Http404":
+        return gettext("Not found");
+      case "Http413":
+        return gettext("File too large");
+      case "Http500":
+        return gettext("Internal error");
       default:
-        return gettext("Something went wrong."); ///
+        return gettext("Something went wrong.");
       break;
     }
   }
@@ -205,7 +215,7 @@ twentyc.editable.action.register(
 
           container.editable("loading-shim", "hide");
         }
-      }
+      };
 
 
       try {
@@ -391,12 +401,12 @@ twentyc.editable.module.register(
     },
 
     execute : function(trigger, container) {
-      var me = $(this), action = trigger.data("edit-action");
+      var action = trigger.data("edit-action");
 
       this.trigger = trigger;
       this.target = twentyc.editable.target.instantiate(container);
 
-      handler = new (twentyc.editable.action.get("module-action"))
+      var handler = new (twentyc.editable.action.get("module-action"))
       handler.loading_shim = this.loading_shim;
       handler.execute(this, action, trigger, container);
     },
@@ -479,7 +489,7 @@ twentyc.editable.module.register(
     },
 
     add : function(rowId, trigger, container, data) {
-      var row = twentyc.editable.templates.copy(this.components.list.data("edit-template"))
+      var row = twentyc.editable.templates.copy(this.components.list.data("edit-template"));
       var k;
       row.attr("data-edit-id", rowId);
       row.data("edit-id", rowId);
@@ -496,6 +506,7 @@ twentyc.editable.module.register(
         this.action.signal_success(container, rowId);
       container.trigger("listing:row-add", [rowId, row, data, this]);
       this.components.list.scrollTop(function() { return this.scrollHeight; });
+      return row;
     },
 
     remove : function(rowId, row, trigger, container) {
@@ -635,7 +646,7 @@ twentyc.editable.target.error_handlers.http_json = function(response, me, sender
   if(response.status == 400) {
     var msg, k, i, info= [gettext("The server rejected your data")]; ///
     for(k in response.responseJSON) {
-      sender.find('[data-edit-name="'+k+'"]').each(function(idx) {
+      sender.find('[data-edit-name="'+k+'"], [data-edit-error-field="'+k+'"]').each(function(idx) {
         var input = $(this).data("edit-input-instance");
         if(input) {
           msg = response.responseJSON[k];
@@ -690,7 +701,7 @@ twentyc.editable.input = new (twentyc.cls.extend(
       if(it.action_on_enter && action) {
         element.on("keydown", function(e) {
           if(e.which == 13) {
-            handler = new (twentyc.editable.action.get(action));
+            var handler = new (twentyc.editable.action.get(action));
             handler.execute(element, container);
           }
         });
@@ -708,7 +719,6 @@ twentyc.editable.input = new (twentyc.cls.extend(
 
 
       var it = new (this.get(element.data("edit-type")));
-      var par = element.parent()
 
       it.container = container;
       it.source = element;
@@ -1042,7 +1052,12 @@ twentyc.editable.input.register(
     },
 
     value_to_label : function() {
-      return this.element.children('option:selected').text();
+      return $.map(
+        this.element.children('option:selected'),
+        function(element) {
+          return $(element).text()
+        }
+      ).join(', ')
     },
 
     apply : function(value) {
@@ -1054,26 +1069,35 @@ twentyc.editable.input.register(
       var opt = $('<option></option>');
       opt.val(id);
       opt.text(name);
-      var value = this.source.data("edit-value")
+      var value = ""+this.source.data("edit-value")
       if(this.source.data("edit-multiple") == "yes") {
-        if(value && $.inArray(id, value.split(",")) > -1)
+        if(value && $.inArray(""+id, value.split(",")) > -1)
           opt.prop("selected", true);
       } else {
         if(id == value)
           opt.prop("selected", true);
       }
+      this.finalize_opt(opt)
       this.element.append(opt);
     },
 
+    finalize_opt : function(opt) {
+      return opt;
+    },
+
     load : function(data) {
-      var k, v, opt;
+      var k, v;
       this.element.empty();
       if(this.source.data("edit-data-all-entry")) {
         var allEntry = this.source.data("edit-data-all-entry").split(":")
         this.add_opt(allEntry[0], allEntry[1]);
+      } else {
+        var allEntry = null;
       }
       for(k in data) {
         v = data[k];
+        if(allEntry && allEntry[0] == v.id)
+          continue
         this.add_opt(v.id, v.name);
       }
       this.element.trigger("change");
@@ -1163,8 +1187,7 @@ $.fn.editable = function(action, arg, dbg) {
           input,
           node,
           nodes,
-          closest,
-          result
+          closest
 
       // BELONGS (container), shortcut for first_closest:["data-edit-target", target]
       if(arg.belongs) {
@@ -1188,7 +1211,7 @@ $.fn.editable = function(action, arg, dbg) {
           node = $(this[i]);
           if(node.data("edit-group"))
             continue;
-          nodes = $('[data-edit-group]').each(function(idx) {
+          $('[data-edit-group]').each(function(idx) {
             var other = $($(this).data("edit-group"));
             if(other.get(0) == node.get(0))
               matched.push(this);

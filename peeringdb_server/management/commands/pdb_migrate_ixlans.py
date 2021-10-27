@@ -1,23 +1,25 @@
-import reversion
+"""
+DEPRECATED
+Used during ixlan migrations for #21.
+"""
 import csv
 import datetime
 
-from django.core.management.base import BaseCommand
-from django.db import connection
-from django.db.models import F
+import reversion
 from django.contrib.admin.models import LogEntry
-
 from django.contrib.contenttypes.models import ContentType
+from django.core.management.base import BaseCommand
+from django.db import connection, transaction
 
 from peeringdb_server.models import (
+    UTC,
+    InternetExchange,
+    InternetExchangeFacility,
     IXLan,
-    NetworkIXLan,
-    IXLanPrefix,
     IXLanIXFMemberImportAttempt,
     IXLanIXFMemberImportLog,
-    InternetExchangeFacility,
-    InternetExchange,
-    UTC,
+    IXLanPrefix,
+    NetworkIXLan,
 )
 
 
@@ -161,6 +163,7 @@ class Command(BaseCommand):
         self.log("Phase 1: Done")
 
     @reversion.create_revision()
+    @transaction.atomic()
     def create_missing_ixlan(self, ix):
         """
         Creates an ixlan for an ix that doesn't have one
@@ -215,6 +218,7 @@ class Command(BaseCommand):
         self.log("Phase 2: Done")
 
     @reversion.create_revision()
+    @transaction.atomic()
     def reparent_ixlan(self, ixlan):
 
         """
@@ -312,6 +316,7 @@ class Command(BaseCommand):
 
         self.post_migration_checks()
 
+    @transaction.atomic()
     def migrate_ixlan_id(self, ixlan, ixlans, trigger=None, tmp_id=False):
 
         """

@@ -1,10 +1,12 @@
+"""
+Restore soft-deleted objects.
+"""
+import json
+
+import reversion
 from django.core.management.base import BaseCommand
 
 from peeringdb_server.models import REFTAG_MAP
-
-import reversion
-import json
-import re
 
 
 class Command(BaseCommand):
@@ -114,7 +116,7 @@ class Command(BaseCommand):
             )
             try:
                 status = json.loads(version.serialized_data)[0].get("fields")["status"]
-            except:
+            except Exception:
                 status = None
             if status == "deleted":
                 self.log_warn(
@@ -132,7 +134,7 @@ class Command(BaseCommand):
                     # relation parent
                     try:
                         relation = getattr(obj, field.name)
-                    except:
+                    except Exception:
                         continue
                     if relation.status == "deleted" and relation != parent:
                         can_undelete_obj = False
@@ -147,7 +149,7 @@ class Command(BaseCommand):
 
         if obj.status == "deleted":
             obj.status = "ok"
-            self.log("Undeleting {}".format(_label(obj)))
+            self.log(f"Undeleting {_label(obj)}")
 
             handler = getattr(self, f"handle_{reftag}", None)
             if handler:
@@ -159,7 +161,7 @@ class Command(BaseCommand):
                     obj.save()
             except Exception as exc:
                 if not self.suppress_warning:
-                    self.log_warn("Cannot undelete {}: {}".format(_label(obj), exc))
+                    self.log_warn(f"Cannot undelete {_label(obj)}: {exc}")
 
         for field in cls._meta.get_fields():
             if field.is_relation:
@@ -167,7 +169,7 @@ class Command(BaseCommand):
                     # relation child
                     try:
                         relation = getattr(obj, field.name)
-                    except:
+                    except Exception:
                         continue
                     if not hasattr(field.related_model, "ref_tag"):
                         continue

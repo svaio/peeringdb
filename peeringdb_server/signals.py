@@ -1,48 +1,150 @@
+"""
+Django signal handlers
+
+- org usergroup creation
+- entity count updates (fac_count, net_count etc.)
+- geocode when address model (org, fac) is saved
+- verification queue creation on new objects
+- asn rdap automation to automatically grant org / network to user
+- user to org affiliation handling when targeted org has no users
+  - notify admin-com
+- CORS enabling for GET api requests
+
+"""
+
+from datetime import datetime, timezone
+
 import django.urls
-from django.db.models.signals import post_save, pre_delete, pre_save
-from django.contrib.contenttypes.models import ContentType
-from django_namespace_perms.models import Group, GroupPermission
-from django_namespace_perms.constants import PERM_CRUD, PERM_READ
-from django.template import loader
-from django.conf import settings
-from django.dispatch import receiver
-from allauth.account.signals import user_signed_up
-
+import reversion
+from allauth.account.signals import email_confirmed, user_signed_up
 from corsheaders.signals import check_request_enabled
-
+from django.conf import settings
+from django.contrib.contenttypes.models import ContentType
+from django.db.models import Count
+from django.db.models.signals import post_save, pre_delete, pre_save
+from django.dispatch import receiver
+from django.template import loader
+from django.utils.translation import override
+from django.utils.translation import ugettext_lazy as _
+from django_grainy.models import Group, GroupPermission
+from django_peeringdb.const import REGION_MAPPING
 from django_peeringdb.models.abstract import AddressModel
+from grainy.const import PERM_CRUD, PERM_READ
 
-from peeringdb_server.inet import RdapLookup, RdapNotFoundError, RdapException
-
+import peeringdb_server.settings as pdb_settings
 from peeringdb_server.deskpro import (
     ticket_queue,
     ticket_queue_asnauto_affil,
     ticket_queue_asnauto_create,
+    ticket_queue_vqi_notify,
 )
-
+from peeringdb_server.inet import RdapException, RdapLookup
 from peeringdb_server.models import (
     QUEUE_ENABLED,
     QUEUE_NOTIFY,
-    UserOrgAffiliationRequest,
-    is_suggested,
-    VerificationQueueItem,
-    Organization,
-    InternetExchange,
     Facility,
     Network,
-    NetworkContact,
+    NetworkIXLan,
+    Organization,
+    UserOrgAffiliationRequest,
+    VerificationQueueItem,
 )
+from peeringdb_server.util import disable_auto_now_and_save
 
-import peeringdb_server.settings as pdb_settings
 
-from django.utils.translation import ugettext_lazy as _
-from django.utils.translation import override
+def update_network_attribute(instance, attribute):
+    """Updates 'attribute' field in Network whenever it's called."""
+    if getattr(instance, "id"):
+        network = instance.network
+        setattr(network, attribute, datetime.now(timezone.utc))
+        disable_auto_now_and_save(network)
+
+
+def network_post_revision_commit(**kwargs):
+    for vs in kwargs.get("versions"):
+        if vs.object.HandleRef.tag in ["netixlan", "poc", "netfac"]:
+            update_network_attribute(vs.object, f"{vs.object.HandleRef.tag}_updated")
+
+
+reversion.signals.post_revision_commit.connect(network_post_revision_commit)
+
+
+def update_counts_for_netixlan(netixlan):
+    """
+    Whenever a netixlan is saved, update the ix_count for the related Network
+    and update net_count for the related InternetExchange.
+    """
+    if getattr(netixlan, "id"):
+        network = netixlan.network
+
+        network.ix_count = (
+            network.netixlan_set_active.aggregate(
+                ix_count=Count("ixlan__ix_id", distinct=True)
+            )
+        )["ix_count"]
+
+        disable_auto_now_and_save(network)
+
+        ix = netixlan.ixlan.ix
+        ix.net_count = (
+            NetworkIXLan.objects.filter(ixlan__ix_id=ix.id, status="ok").aggregate(
+                net_count=Count("network_id", distinct=True)
+            )
+        )["net_count"]
+        disable_auto_now_and_save(ix)
+
+
+def update_counts_for_netfac(netfac):
+    """
+    Whenever a netfac is saved, update the fac_count for the related Network
+    and update net_count for the related Facility.
+    """
+    if getattr(netfac, "id"):
+        network = netfac.network
+
+        network.fac_count = network.netfac_set_active.count()
+
+        disable_auto_now_and_save(network)
+
+        facility = netfac.facility
+        facility.net_count = facility.netfac_set_active.count()
+        disable_auto_now_and_save(facility)
+
+
+def update_counts_for_ixfac(ixfac):
+    """
+    Whenever a ixfac is saved, update the fac_count for the related Exchange
+    and update ix_count for the related Facility.
+    """
+    if getattr(ixfac, "id"):
+        ix = ixfac.ix
+
+        ix.fac_count = ix.ixfac_set_active.count()
+
+        disable_auto_now_and_save(ix)
+
+        facility = ixfac.facility
+        facility.ix_count = facility.ixfac_set_active.count()
+        disable_auto_now_and_save(facility)
+
+
+def connector_objects_post_revision_commit(**kwargs):
+    for vs in kwargs.get("versions"):
+        if vs.object.HandleRef.tag == "netixlan":
+            update_counts_for_netixlan(vs.object)
+        if vs.object.HandleRef.tag == "netfac":
+            update_counts_for_netfac(vs.object)
+        if vs.object.HandleRef.tag == "ixfac":
+            update_counts_for_ixfac(vs.object)
+
+
+reversion.signals.post_revision_commit.connect(connector_objects_post_revision_commit)
 
 
 def addressmodel_save(sender, instance=None, **kwargs):
     """
     Mark address model objects for geocode sync if one of the address
-    fields is updated
+    fields is updated.
     """
 
     if instance.id:
@@ -64,63 +166,62 @@ pre_save.connect(addressmodel_save, sender=Facility)
 
 def org_save(sender, **kwargs):
     """
-    we want to create a user group for an organization when that
-    organization is created
+    Create a user group for an organization when that
+    organization is created.
     """
 
     inst = kwargs.get("instance")
-    ix_namespace = InternetExchange.nsp_namespace_from_id(inst.id, "*")
 
     # make the general member group for the org
     try:
-        group = Group.objects.get(name=inst.group_name)
+        Group.objects.get(name=inst.group_name)
     except Group.DoesNotExist:
         group = Group(name=inst.group_name)
         group.save()
 
         perm = GroupPermission(
-            group=group, namespace=inst.nsp_namespace, permissions=PERM_READ
+            group=group, namespace=inst.grainy_namespace, permission=PERM_READ
         )
         perm.save()
 
         GroupPermission(
             group=group,
-            namespace=NetworkContact.nsp_namespace_from_id(inst.id, "*", "private"),
-            permissions=PERM_READ,
+            namespace=f"{inst.grainy_namespace}.network.*.poc_set.private",
+            permission=PERM_READ,
         ).save()
 
         GroupPermission(
             group=group,
-            namespace=f"{ix_namespace}.ixf_ixp_member_list_url.private",
-            permissions=PERM_READ,
+            namespace=f"{inst.grainy_namespace}.internetexchange.*.ixf_ixp_member_list_url.private",
+            permission=PERM_READ,
         ).save()
 
     # make the admin group for the org
     try:
-        group = Group.objects.get(name=inst.admin_group_name)
+        Group.objects.get(name=inst.admin_group_name)
     except Group.DoesNotExist:
         group = Group(name=inst.admin_group_name)
         group.save()
 
         perm = GroupPermission(
-            group=group, namespace=inst.nsp_namespace, permissions=PERM_CRUD
+            group=group, namespace=inst.grainy_namespace, permission=PERM_CRUD
         )
         perm.save()
 
         GroupPermission(
-            group=group, namespace=inst.nsp_namespace_manage, permissions=PERM_CRUD
+            group=group, namespace=inst.grainy_namespace_manage, permission=PERM_CRUD
         ).save()
 
         GroupPermission(
             group=group,
-            namespace=NetworkContact.nsp_namespace_from_id(inst.id, "*", "private"),
-            permissions=PERM_CRUD,
+            namespace=f"{inst.grainy_namespace}.network.*.poc_set.private",
+            permission=PERM_CRUD,
         ).save()
 
         GroupPermission(
             group=group,
-            namespace=f"{ix_namespace}.ixf_ixp_member_list_url.private",
-            permissions=PERM_CRUD,
+            namespace=f"{inst.grainy_namespace}.internetexchange.*.ixf_ixp_member_list_url.private",
+            permission=PERM_CRUD,
         ).save()
 
     if inst.status == "deleted":
@@ -133,8 +234,8 @@ post_save.connect(org_save, sender=Organization)
 
 def org_delete(sender, instance, **kwargs):
     """
-    When an organization is HARD deleted we want to also remove any
-    usergroups tied to the organization
+    When an organization is HARD deleted, remove any
+    usergroups tied to the organization.
     """
 
     try:
@@ -158,11 +259,10 @@ pre_delete.connect(org_delete, sender=Organization)
 def new_user_to_guests(request, user, sociallogin=None, **kwargs):
     """
     When a user is created via oauth login put them in the guest
-    group for now.
+    group temporarily.
 
-    Unless pdb_settings.AUTO_VERIFY_USERS is toggled on in settings, in which
-    case users get automatically verified (note that this does
-    not include email verification, they will still need to do that)
+    If pdb_settings.AUTO_VERIFY_USERS is toggled on in the settings, users get automatically verified (Note: this does
+    not include email verification, they will still need to do that).
     """
 
     if pdb_settings.AUTO_VERIFY_USERS:
@@ -171,16 +271,21 @@ def new_user_to_guests(request, user, sociallogin=None, **kwargs):
         user.set_unverified()
 
 
+@receiver(email_confirmed, dispatch_uid="allauth.email_confirmed")
+def recheck_ownership_requests(request, email_address, **kwargs):
+    if request.user.is_authenticated:
+        request.user.recheck_affiliation_requests()
+
+
 # USER TO ORGANIZATION AFFILIATION
 
 
 def uoar_creation(sender, instance, created=False, **kwargs):
     """
-    When a user to organization affiliation request is created
-    we want to notify the approporiate management entity
+    Notify the approporiate management entity when a user to organization affiliation request is created.
 
-    We also want to attempt to derive the targeted organization
-    from the ASN the user provided
+    Attempt to derive the targeted organization
+    from the ASN the user provided.
     """
 
     if created:
@@ -232,8 +337,7 @@ def uoar_creation(sender, instance, created=False, **kwargs):
                 # Lookup RDAP information
                 try:
                     rdap_lookup = rdap = RdapLookup().get_asn(instance.asn)
-                    ok = rdap_lookup.emails
-                except RdapException as inst:
+                except RdapException:
                     instance.deny()
                     raise
 
@@ -271,6 +375,7 @@ def uoar_creation(sender, instance, created=False, **kwargs):
                     return
 
             if instance.org:
+
                 # organization has been set on affiliation request
                 entity_name = instance.org.name
                 if not instance.org.owned:
@@ -400,12 +505,11 @@ if getattr(settings, "DISABLE_VERIFICATION_QUEUE", False) is False:
         if instance.notified:
             return
 
-        # we don't sent notifications unless requesting user has been identified
-        if not instance.user_id:
+        # no contact point exists
+        if not instance.user_id and not instance.org_key:
             return
 
         item = instance.item
-        user = instance.user
 
         if type(item) in QUEUE_NOTIFY and not getattr(
             settings, "DISABLE_VERIFICATION_QUEUE_EMAILS", False
@@ -416,30 +520,7 @@ if getattr(settings, "DISABLE_VERIFICATION_QUEUE", False) is False:
             else:
                 rdap = None
 
-            with override("en"):
-                entity_type_name = str(instance.content_type)
-
-            title = f"{entity_type_name} - {item}"
-
-            if is_suggested(item):
-                title = f"[SUGGEST] {title}"
-
-            ticket_queue(
-                title,
-                loader.get_template("email/notify-pdb-admin-vq.txt").render(
-                    {
-                        "entity_type_name": entity_type_name,
-                        "suggested": is_suggested(item),
-                        "item": item,
-                        "user": user,
-                        "rdap": rdap,
-                        "edit_url": "%s%s"
-                        % (settings.BASE_URL, instance.item_admin_url),
-                    }
-                ),
-                instance.user,
-            )
-
+            ticket_queue_vqi_notify(instance, rdap)
             instance.notified = True
             instance.save()
 
@@ -458,3 +539,14 @@ def cors_allow_api_get_to_everyone(sender, request, **kwargs):
 
 
 check_request_enabled.connect(cors_allow_api_get_to_everyone)
+
+
+def auto_fill_region_continent(sender, instance, **kwargs):
+    if instance.country.code:
+
+        for region in REGION_MAPPING:
+            if instance.country.code == region["code"]:
+                instance.region_continent = region["continent"]
+
+
+pre_save.connect(auto_fill_region_continent, sender=Facility)

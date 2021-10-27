@@ -1,25 +1,26 @@
-from django import template
-from django.utils.translation import ugettext_lazy as _
-from django.utils.safestring import mark_safe
 import datetime
+import random
+
+import bleach
+import markdown
+import tld
+from django import template
+from django.utils.safestring import mark_safe
+from django.utils.translation import ugettext_lazy as _
+from django_countries import countries
+from django_grainy.helpers import int_flags
+
+from peeringdb_server.inet import RdapException
 from peeringdb_server.models import (
+    PARTNERSHIP_LEVELS,
+    Facility,
     InternetExchange,
     Network,
-    Facility,
     Organization,
-    PARTNERSHIP_LEVELS,
     format_speed,
 )
-
-from peeringdb_server.views import DoNotRender
 from peeringdb_server.org_admin_views import permission_ids
-from peeringdb_server.inet import RdapException
-from django_countries import countries
-from django_namespace_perms.util import get_permission_flag
-import tld
-import random
-import markdown
-import bleach
+from peeringdb_server.views import DoNotRender
 
 countries_dict = dict(countries)
 
@@ -27,7 +28,19 @@ register = template.Library()
 
 
 @register.filter
+def editable_list_join(value):
+    if not value:
+        return ""
+    return ",".join(value)
+
+
+@register.filter
 def editable_list_value(row):
+    if row.get("multiple"):
+        if row.get("value"):
+            return ", ".join(row.get("value"))
+        return ""
+
     if row.get("value") or row.get("value_label"):
         return _(row.get("value_label", row.get("value")))
     elif row.get("blank") and row.get("value") == "":
@@ -56,7 +69,7 @@ def org_permission_id_xl(org, id):
 
 @register.filter
 def check_perms(v, op):
-    flg = get_permission_flag(op)
+    flg = int_flags(op)
     return v & flg == flg
 
 
@@ -83,7 +96,7 @@ def ownership_warning(org, user):
                 if user.validate_rdap_relationship(rdap):
                     b = True
                     break
-            except RdapException as exc:
+            except RdapException:
                 # we don't need to do anything with the rdap exception here, as it will
                 # be raised apropriately when the request is sent off
                 pass
@@ -174,6 +187,16 @@ def ref_tag(value):
     elif value == "Organization":
         return Organization.handleref.tag
     return "unknown"
+
+
+@register.filter
+def autocomplete_preload_net(value):
+    if not value:
+        return ""
+
+    qset = Network.objects.filter(status="ok", id__in=value.split(","))
+
+    return ",".join([f"{net.id};{net.name}" for net in qset])
 
 
 @register.filter

@@ -1,6 +1,15 @@
+"""
+Augment REST API schema to use for open-api schema generation.
+
+open-api schema generation leans heavily on automatic generation
+implemented through the django-rest-framework.
+
+Specify custom fields to be added to the generated open-api schema.
+"""
 import re
-from django.utils.translation import ugettext as _
+
 from django.conf import settings
+from django.utils.translation import ugettext as _
 from rest_framework.schemas.openapi import AutoSchema
 
 
@@ -17,7 +26,7 @@ class BaseSchema(AutoSchema):
 
     """
     Augments the openapi schema generation for
-    the peeringdb API docs
+    the peeringdb API docs.
     """
 
     # map django internal types to openapi types
@@ -57,7 +66,7 @@ class BaseSchema(AutoSchema):
 
     def get_operation_type(self, *args):
         """
-        Determine if this is a list retrieval operation
+        Determine if this is a list retrieval operation.
         """
 
         method = args[1]
@@ -79,7 +88,7 @@ class BaseSchema(AutoSchema):
 
     def _get_operation_id(self, path, method):
         """
-        We override this so operation ids become "{op} {reftag}"
+        Override this so operation ids become "{op} {reftag}"
         """
 
         serializer, model = self.get_classes(path, method)
@@ -93,8 +102,8 @@ class BaseSchema(AutoSchema):
     def get_operation(self, *args, **kwargs):
 
         """
-        We override this so we can augment the operation dict
-        for an openapi schema operation
+        Override this so we can augment the operation dict
+        for an openapi schema operation.
         """
 
         op_dict = super().get_operation(*args, **kwargs)
@@ -142,7 +151,7 @@ class BaseSchema(AutoSchema):
 
     def get_classes(self, *op_args):
         """
-        Try to relate a serializer and model class to the openapi operation
+        Try to relate a serializer and model class to the openapi operation.
 
         Returns:
 
@@ -158,7 +167,7 @@ class BaseSchema(AutoSchema):
 
     def augment_retrieve_operation(self, op_dict, op_args):
         """
-        Augment openapi schema for single object retrieval
+        Augment openapi schema for single object retrieval.
         """
 
         parameters = op_dict.get("parameters")
@@ -183,7 +192,7 @@ class BaseSchema(AutoSchema):
 
     def augment_list_operation(self, op_dict, op_args):
         """
-        Augment openapi schema for object listings
+        Augment openapi schema for object listings.
         """
         parameters = op_dict.get("parameters")
         serializer, model = self.get_classes(*op_args)
@@ -251,7 +260,7 @@ class BaseSchema(AutoSchema):
         """
         Further augment openapi schema for object listing by filling
         the query parameter list with all the possible query filters
-        for the object
+        for the object.
         """
 
         field_names = [
@@ -486,10 +495,10 @@ class BaseSchema(AutoSchema):
 
     def augment_create_operation(self, op_dict, op_args):
         """
-        Augment openapi schema for object creation
+        Augment openapi schema for object creation.
         """
 
-        parameters = op_dict.get("parameters")
+        op_dict.get("parameters")
         serializer, model = self.get_classes(*op_args)
 
         if not model:
@@ -502,7 +511,7 @@ class BaseSchema(AutoSchema):
     def request_body_schema(self, op_dict, content="application/json"):
         """
         Helper function that return the request body schema
-        for the specified content type
+        for the specified content type.
         """
 
         return (
@@ -514,7 +523,7 @@ class BaseSchema(AutoSchema):
 
     def augment_create_ix(self, serializer, model, op_dict):
         """
-        Augment openapi schema for create ix operation
+        Augment openapi schema for create ix operation.
         """
         request_body_schema = self.request_body_schema(op_dict)
 
@@ -523,7 +532,7 @@ class BaseSchema(AutoSchema):
 
     def augment_update_ix(self, serializer, model, op_dict):
         """
-        Augment openapi schema for update ix operation
+        Augment openapi schema for update ix operation.
         """
         request_body_schema = self.request_body_schema(op_dict)
         properties = request_body_schema["properties"]
@@ -536,7 +545,7 @@ class BaseSchema(AutoSchema):
 
     def augment_update_fac(self, serializer, model, op_dict):
         """
-        Augment openapi schema for update fac operation
+        Augment openapi schema for update fac operation.
         """
         request_body_schema = self.request_body_schema(op_dict)
         properties = request_body_schema["properties"]
@@ -546,7 +555,7 @@ class BaseSchema(AutoSchema):
 
     def augment_update_net(self, serializer, model, op_dict):
         """
-        Augment openapi schema for update net operation
+        Augment openapi schema for update net operation.
         """
         request_body_schema = self.request_body_schema(op_dict)
         properties = request_body_schema["properties"]
@@ -556,9 +565,9 @@ class BaseSchema(AutoSchema):
 
     def augment_update_operation(self, op_dict, op_args):
         """
-        Augment openapi schema for update operation
+        Augment openapi schema for update operation.
         """
-        parameters = op_dict.get("parameters")
+        op_dict.get("parameters")
         serializer, model = self.get_classes(*op_args)
 
         if not model:
@@ -570,9 +579,9 @@ class BaseSchema(AutoSchema):
 
     def augment_delete_operation(self, op_dict, op_args):
         """
-        Augment openapi schema for delete operation
+        Augment openapi schema for delete operation.
         """
-        parameters = op_dict.get("parameters")
+        op_dict.get("parameters")
         serializer, model = self.get_classes(*op_args)
 
         if not model:

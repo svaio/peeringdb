@@ -1,50 +1,78 @@
-import re
-import json
+"""
+Django model definitions (database schema).
+
+## django-peeringdb
+
+peeringdb_server uses the abstract models from django-peeringdb.
+
+Often, it makes the most sense for a field to be added to the abstraction
+in django-peeringdb, so it can be available for people using local snapshots of the databases.
+
+Generally speaking, if the field is to be added to the REST API output,
+it should be added through django-peeringdb.
+
+Fields to facilitate internal operations of peeringdb on the other hand, DO NOT need to be added to django-peeringdb.
+
+## migrations
+
+For concrete models, django-peeringdb and peeringdb_server maintain separate model migrations.
+
+When adding new fields to django-peeringdb make sure migration files for the schema changes exist in both places.
+
+Please open a merge request in peeringdb/django-peeringdb for the field addition as well.
+"""
+
+
 import datetime
-from itertools import chain
-import uuid
 import ipaddress
-import googlemaps.exceptions
-import requests
-import reversion
+import json
+import re
+import uuid
+from itertools import chain
 
 import django.urls
-from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
-from django.contrib.auth.models import UserManager, Group
+import django_peeringdb.models as pdb_models
+import reversion
+from allauth.account.models import EmailAddress, EmailConfirmation
+from allauth.socialaccount.models import SocialAccount
+from django.conf import settings
+from django.contrib.auth.models import (
+    AbstractBaseUser,
+    Group,
+    PermissionsMixin,
+    UserManager,
+)
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core import validators
-from django.core.mail.message import EmailMultiAlternatives
 from django.core.exceptions import ValidationError
+from django.core.mail.message import EmailMultiAlternatives
 from django.db import models, transaction
-from django.utils import timezone
-from django.utils.html import strip_tags
-from django.utils.http import urlquote
-from django.utils.translation import ugettext_lazy as _
-from django.utils.translation import override
-from django.utils.functional import Promise
-from django.conf import settings
 from django.template import loader
-from django_namespace_perms.util import autodiscover_namespaces, has_perms
-from django_handleref.models import (
-    CreatedDateTimeField,
-    UpdatedDateTimeField,
-)
-import django_peeringdb.models as pdb_models
+from django.utils import timezone
+from django.utils.functional import Promise
+from django.utils.http import urlquote
+from django.utils.translation import override
+from django.utils.translation import ugettext_lazy as _
+from django_grainy.decorators import grainy_model
+from django_grainy.models import Permission, PermissionManager
+from django_grainy.util import check_permissions
+from django_handleref.models import CreatedDateTimeField, UpdatedDateTimeField
 from django_inet.models import ASNField
-
-from allauth.account.models import EmailAddress, EmailConfirmation
-from allauth.socialaccount.models import SocialAccount
 from passlib.hash import sha256_crypt
+from rest_framework_api_key.models import AbstractAPIKey
 
+import peeringdb_server.geo as geo
 from peeringdb_server.inet import RdapLookup, RdapNotFoundError
+from peeringdb_server.request import bypass_validation
 from peeringdb_server.validators import (
     validate_address_space,
     validate_info_prefixes4,
     validate_info_prefixes6,
-    validate_prefix_overlap,
-    validate_phonenumber,
     validate_irr_as_set,
+    validate_phonenumber,
+    validate_poc_visible,
+    validate_prefix_overlap,
 )
 
 SPONSORSHIP_LEVELS = (
@@ -52,6 +80,13 @@ SPONSORSHIP_LEVELS = (
     (2, _("Gold")),
     (3, _("Platinum")),
     (4, _("Diamond")),
+)
+
+SPONSORSHIP_CSS = (
+    (1, "silver"),
+    (2, "gold"),
+    (3, "platinum"),
+    (4, "diamond"),
 )
 
 PARTNERSHIP_LEVELS = ((1, _("Data Validation")), (2, _("RIR")))
@@ -90,14 +125,14 @@ def make_relation_filter(field, filt, value, prefix=None):
     return filt
 
 
-def validate_PUT_ownership(user, instance, data, fields):
+def validate_PUT_ownership(permission_holder, instance, data, fields):
     """
-    Helper function that checks if a user has write perms to
+    Helper function that checks if a user or API key has write perms to
     the instance provided as well as write perms to any
     child instances specified by fields as they exist on
-    the model and in data
+    the model and in data.
 
-    example:
+    Example:
 
     validate_PUT_ownership(
       request.user,
@@ -118,7 +153,7 @@ def validate_PUT_ownership(user, instance, data, fields):
     if any fail the permission check False is returned.
     """
 
-    if not has_perms(user, instance, "update"):
+    if not check_permissions(permission_holder, instance, "u"):
         return False
 
     for fld in fields:
@@ -137,7 +172,7 @@ def validate_PUT_ownership(user, instance, data, fields):
         if a.id != s_id:
             try:
                 other = a.__class__.objects.get(id=s_id)
-                if not has_perms(user, other, "update"):
+                if not check_permissions(permission_holder, other, "u"):
                     return False
             except ValueError:  # if id is not intable
                 return False
@@ -149,7 +184,7 @@ def is_suggested(entity):
     """
     Check if the network, facility or exchange is a suggested
     entity (is it a memeber of the organization designated to
-    hold suggested entities)
+    hold suggested entities).
     """
 
     # if no org is specified, entity suggestion is turned
@@ -163,7 +198,7 @@ def is_suggested(entity):
 
 class UTC(datetime.tzinfo):
     """
-    UTC+0 tz for tz aware datetime fields
+    UTC+0 tz for tz aware datetime fields.
     """
 
     def utcoffset(self, d):
@@ -172,10 +207,8 @@ class UTC(datetime.tzinfo):
 
 class URLField(pdb_models.URLField):
     """
-    local defaults for URLField
+    Local defaults for URLField.
     """
-
-    pass
 
 
 class ValidationErrorEncoder(json.JSONEncoder):
@@ -200,20 +233,20 @@ class ProtectedMixin:
     """
     Mixin that implements checks for changing
     / deleting a model instance that will block
-    such actions under certain circumstances
+    such actions under certain circumstances.
     """
 
     @property
     def deletable(self):
         """
         Should return whether the object is currently
-        in a state where it can safely be soft-deleted
+        in a state where it can safely be soft-deleted.
 
-        If not not deletable, should specify reason in
+        If not deletable, should specify reason in
         `_not_deletable_reason` property.
 
-        If deletable should, set `_not_deletable_reason`
-        property to None
+        If deletable, should set `_not_deletable_reason`
+        property to None.
         """
         return True
 
@@ -222,38 +255,44 @@ class ProtectedMixin:
         return getattr(self, "_not_deletable_reason", None)
 
     def delete(self, hard=False, force=False):
-        if not self.deletable and not force:
-            raise ProtectedAction(self)
+
+        if self.status in ["ok", "pending"]:
+            if not self.deletable and not force:
+                raise ProtectedAction(self)
 
         self.delete_cleanup()
         return super().delete(hard=hard)
 
     def delete_cleanup(self):
         """
-        Runs cleanup before delete
+        Runs cleanup before delete.
 
-        Override this in the class that uses this mixin (if needed)
+        Override this in the class that uses this mixin (if needed).
         """
         return
+
+    def save_without_timestamp(self):
+        self._meta.get_field("updated").auto_now = False
+        try:
+            self.save()
+        finally:
+            self._meta.get_field("updated").auto_now = True
 
 
 class GeocodeBaseMixin(models.Model):
     """
-    Mixin to use for geocode enabled entities
-    Allows an entity to be geocoded with the pdb_geo_sync command
+    Mixin to use for geocode enabled entities.
+    Allows an entity to be geocoded with the pdb_geo_sync command.
     """
 
     geocode_status = models.BooleanField(
         default=False,
         help_text=_(
-            "Has this object's latitude and longitude been synchronized to its address fields"
+            "Has this object's address been normalized with a call to the Google Maps API"
         ),
     )
     geocode_date = models.DateTimeField(
         blank=True, null=True, help_text=_("Last time of attempted geocode")
-    )
-    geocode_error = models.TextField(
-        blank=True, null=True, help_text=_("Error message of previous geocode attempt")
     )
 
     class Meta:
@@ -262,7 +301,7 @@ class GeocodeBaseMixin(models.Model):
     @property
     def geocode_coordinates(self):
         """
-        Return a tuple holding the latitude and longitude
+        Return a tuple holding the latitude and longitude.
         """
         if self.latitude is not None and self.longitude is not None:
             return (self.latitude, self.longitude)
@@ -271,55 +310,190 @@ class GeocodeBaseMixin(models.Model):
     @property
     def geocode_address(self):
         """
-        Returns an address string suitable for googlemaps query
+        Returns an address string suitable for geo API query.
         """
         # pylint: disable=missing-format-attribute
         return "{e.address1} {e.address2}, {e.city}, {e.state} {e.zipcode}".format(
             e=self
         )
 
-    def geocode(self, gmaps, save=True):
-        """
-        Sets the latitude, longitude field values of this model by geocoding the
-        address specified in the relevant fields.
+    def process_geo_location(self, geocode=True, save=True):
 
-        Argument(s):
-
-            - gmaps: googlemaps instance
         """
+        Sets longitude and latitude.
+
+        Will return a dict containing normalized address
+        data.
+        """
+
+        melissa = geo.Melissa(settings.MELISSA_KEY, timeout=5)
+        gmaps = geo.GoogleMaps(settings.GOOGLE_GEOLOC_API_KEY, timeout=5)
+
+        # geocode using google
+
+        use_melissa_coords = False
+
         try:
-            result = gmaps.geocode(
-                self.geocode_address, components={"country": self.country.code}
-            )
-            if result and (
-                "street_address" in result[0]["types"]
-                or "establishment" in result[0]["types"]
-                or "premise" in result[0]["types"]
-                or "subpremise" in result[0]["types"]
-            ):
-                loc = result[0].get("geometry").get("location")
-                self.latitude = loc.get("lat")
-                self.longitude = loc.get("lng")
-                self.geocode_error = None
+            if geocode:
+                gmaps.geocode(self)
+        except geo.Timeout:
+            raise ValidationError(_("Geo coding timed out"))
+        except geo.RequestError as exc:
+            raise ValidationError(_("Geo coding failed: {}").format(exc))
+        except geo.NotFound:
+            use_melissa_coords = True
+
+        # address normalization using melissa
+        #
+        # note: `sanitized` will be an empty dict if melissa
+        # could not normalize a valid address
+
+        try:
+            sanitized = melissa.sanitize_address_model(self)
+        except geo.Timeout:
+            raise ValidationError(_("Geo location lookup timed out"))
+        except geo.RequestError as exc:
+            raise ValidationError(_("Geo location lookup failed: {}").format(exc))
+
+        # update latitude and longitude
+
+        if use_melissa_coords and sanitized:
+            self.latitude = sanitized["latitude"]
+            self.longitude = sanitized["longitude"]
+
+        if geocode and (not use_melissa_coords or sanitized):
+            self.geocode_status = True
+            self.geocode_date = datetime.datetime.now(datetime.timezone.utc)
+            if sanitized:
+                sanitized["geocode_status"] = True
+                sanitized["geocode_date"] = self.geocode_date
+
+        if save:
+            self.save()
+
+        return sanitized
+
+
+class GeoCoordinateCache(models.Model):
+
+    """
+    Stores geocoordinates for address lookups.
+    """
+
+    country = pdb_models.CountryField()
+    city = models.CharField(max_length=255, null=True, blank=True)
+    address1 = models.CharField(max_length=255, null=True, blank=True)
+    state = models.CharField(max_length=255, null=True, blank=True)
+    zipcode = models.CharField(max_length=255, null=True, blank=True)
+
+    latitude = models.DecimalField(
+        _("Latitude"), max_digits=9, decimal_places=6, null=True, blank=True
+    )
+    longitude = models.DecimalField(
+        _("Longitude"), max_digits=9, decimal_places=6, null=True, blank=True
+    )
+
+    fetched = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "peeringdb_geocoord_cache"
+        verbose_name = _("Geocoordinate Cache")
+        verbose_name_plural = _("Geocoordinate Cache Entries")
+
+    @classmethod
+    def request_coordinates(cls, **kwargs):
+
+        address_fields = [
+            "address1",
+            "zipcode",
+            "state",
+            "city",
+            "country",
+        ]
+
+        # we only request geo-coordinates if country and
+        # city/state are specified
+
+        if not kwargs.get("country"):
+            return None
+
+        if not kwargs.get("city") and not kwargs.get("state"):
+            return None
+
+        # address string passed to google for lookup
+        address = []
+
+        # filters passed to GeoCoordinateCache for cache retrieval
+        filters = {}
+
+        # attributes passed to GeoCoordinateCache for cache creation
+        params = {}
+
+        # prepare geo-coordinate filters, params and lookup
+
+        for field in address_fields:
+
+            value = kwargs.get(field, None)
+            if value and isinstance(value, list):
+                value = value[0]
+            if field != "country" and value:
+                address.append(f"{value}")
             else:
-                self.latitude = None
-                self.longitude = None
-                self.geocode_error = _("Address not found")
-            self.geocode_status = True
-            return result
-        except (
-            googlemaps.exceptions.HTTPError,
-            googlemaps.exceptions.ApiError,
-        ) as inst:
-            self.geocode_error = str(inst)
-            self.geocode_status = True
-        except googlemaps.exceptions.Timeout as inst:
-            self.geocode_error = _("API Timeout")
-            self.geocode_status = False
-        finally:
-            self.geocode_date = datetime.datetime.now().replace(tzinfo=UTC())
-            if save:
-                self.save()
+                country = value
+
+            params[field] = value
+
+            if value:
+                filters[field] = value
+            else:
+                filters[f"{field}__isnull"] = True
+
+        # attempt to retrieve a valid cache
+
+        cache = cls.objects.filter(**filters).order_by("-fetched").first()
+
+        if cache:
+            tdiff = timezone.now() - cache.fetched
+
+            # check if cache is past expiry date, and expire it if so
+
+            if tdiff.total_seconds() > settings.GEOCOORD_CACHE_EXPIRY:
+                cache.delete()
+                cache = None
+
+        if not cache:
+
+            # valid geo-coord cache does not exist, request coordinates
+            # from google and create a cache entry
+
+            address = " ".join(address)
+            google = geo.GoogleMaps(settings.GOOGLE_GEOLOC_API_KEY)
+            try:
+
+                if params.get("address1"):
+                    typ = "premise"
+                elif params.get("zipcode"):
+                    typ = "postal"
+                elif params.get("city"):
+                    typ = "city"
+                elif params.get("state"):
+                    typ = "state"
+                else:
+                    typ = "country"
+
+                coords = google.geocode_address(address, country, typ=typ)
+                cache = cls.objects.create(
+                    latitude=coords["lat"], longitude=coords["lng"], **params
+                )
+            except geo.NotFound:
+
+                # google could not find address
+                # we still create a cache entry with null coordinates.
+
+                cls.objects.create(**params)
+                raise
+
+        return {"longitude": cache.longitude, "latitude": cache.latitude}
 
 
 class UserOrgAffiliationRequest(models.Model):
@@ -327,8 +501,8 @@ class UserOrgAffiliationRequest(models.Model):
     Whenever a user requests to be affiliated to an Organization
     through an ASN the request is stored in this object.
 
-    When an ASN is entered that is not in the database yet it will
-    notify PDB staff
+    When an ASN is entered that is not yet in the database it will
+    notify PDB staff.
 
     When an ASN is entered that is already in the database the organization
     adminstration is notified and they can then approve or deny
@@ -397,10 +571,15 @@ class UserOrgAffiliationRequest(models.Model):
 
     def approve(self):
         """
-        approve request and add user to org's usergroup
+        Approve request and add user to org's usergroup.
         """
 
         if self.org_id:
+
+            if self.user.is_org_admin(self.org) or self.user.is_org_member(self.org):
+                self.delete()
+                return
+
             if (
                 self.org.admin_usergroup.user_set.count() > 0
                 or self.org.usergroup.user_set.count() > 0
@@ -424,24 +603,29 @@ class UserOrgAffiliationRequest(models.Model):
 
     def deny(self):
         """
-        deny request, marks request as denied and keeps
-        it around until requesting user deletes it
+        Deny request, marks request as denied and keeps
+        it around until requesting user deletes it.
         """
+
+        if self.user and self.org:
+            if self.user.is_org_admin(self.org) or self.user.is_org_member(self.org):
+                self.delete()
+                return
 
         self.status = "denied"
         self.save()
 
     def cancel(self):
         """
-        deny request, marks request as canceled and keeps
-        it around until requesting user deletes it
+        Deny request, marks request as canceled and keeps
+        it around until requesting user deletes it.
         """
         self.status = "canceled"
         self.save()
 
     def notify_ownership_approved(self):
         """
-        Sends a notification email to the requesting user
+        Sends a notification email to the requesting user.
         """
         if not self.org:
             return
@@ -466,10 +650,10 @@ class UserOrgAffiliationRequest(models.Model):
 class VerificationQueueItem(models.Model):
     """
     Keeps track of new items created that need to be reviewed and approved
-    by administrators
+    by administrators.
 
     Queue items are added through the create signals tied to the various
-    objects (peeringdb_server/signals.py)
+    objects (peeringdb_server/signals.py).
     """
 
     # reference to the item that requires review stored in generic fk
@@ -484,6 +668,17 @@ class VerificationQueueItem(models.Model):
         blank=True,
         help_text=_("The item that this queue is attached to was created by this user"),
     )
+    org_key = models.ForeignKey(
+        "peeringdb_server.OrganizationAPIKey",
+        on_delete=models.CASCADE,
+        related_name="vqitems",
+        null=True,
+        blank=True,
+        help_text=_(
+            "The item that this queue is attached to was created by this organization api key"
+        ),
+    )
+
     created = CreatedDateTimeField()
     notified = models.BooleanField(default=False)
 
@@ -495,8 +690,8 @@ class VerificationQueueItem(models.Model):
     def get_for_entity(cls, entity):
         """
         Returns verification queue item for the provided
-        entity if it exists, else raises a DoesNotExist
-        exception
+        entity if it exists or raises a DoesNotExist
+        exception.
         """
 
         return cls.objects.get(
@@ -507,7 +702,7 @@ class VerificationQueueItem(models.Model):
     @property
     def item_admin_url(self):
         """
-        Return admin url for the object in the verification queue
+        Return admin url for the object in the verification queue.
         """
         return django.urls.reverse(
             "admin:%s_%s_change"
@@ -518,7 +713,7 @@ class VerificationQueueItem(models.Model):
     @property
     def approve_admin_url(self):
         """
-        Return admin url for approval of the verification queue item
+        Return admin url for approval of the verification queue item.
         """
         return django.urls.reverse(
             f"admin:{self._meta.app_label}_{self._meta.model_name}_actions",
@@ -528,7 +723,7 @@ class VerificationQueueItem(models.Model):
     @property
     def deny_admin_url(self):
         """
-        Return admin url for denial of the verification queue item
+        Return admin url for denial of the verification queue item.
         """
         return django.urls.reverse(
             f"admin:{self._meta.app_label}_{self._meta.model_name}_actions",
@@ -536,9 +731,10 @@ class VerificationQueueItem(models.Model):
         )
 
     @reversion.create_revision()
+    @transaction.atomic()
     def approve(self):
         """
-        Approve the verification queue item
+        Approve the verification queue item.
         """
         if hasattr(self.item, "status"):
             self.item.status = "ok"
@@ -549,7 +745,7 @@ class VerificationQueueItem(models.Model):
 
     def deny(self):
         """
-        Deny the verification queue item
+        Deny the verification queue item.
         """
         if hasattr(self.item, "vq_deny"):
             self.item.vq_deny()
@@ -563,7 +759,10 @@ class VerificationQueueItem(models.Model):
 class DeskProTicket(models.Model):
     subject = models.CharField(max_length=255)
     body = models.TextField()
-    user = models.ForeignKey("peeringdb_server.User", on_delete=models.CASCADE)
+    user = models.ForeignKey(
+        "peeringdb_server.User", on_delete=models.CASCADE, null=True, blank=True
+    )
+    email = models.EmailField(_("email address"), null=True, blank=True)
     created = models.DateTimeField(auto_now_add=True)
     published = models.DateTimeField(null=True, blank=True)
 
@@ -583,17 +782,37 @@ class DeskProTicket(models.Model):
         verbose_name_plural = _("DeskPRO Tickets")
 
 
-@reversion.register
-class Organization(ProtectedMixin, pdb_models.OrganizationBase):
+class DeskProTicketCC(models.Model):
+
     """
-    Describes a peeringdb organization
+    Describes a contact to be cc'd on the deskpro ticket.
+    """
+
+    ticket = models.ForeignKey(
+        DeskProTicket,
+        on_delete=models.CASCADE,
+        related_name="cc_set",
+    )
+    email = models.EmailField()
+
+    class Meta:
+        unique_together = (("ticket", "email"),)
+        verbose_name = _("DeskPRO Ticket CC Contact")
+        verbose_name_plural = _("Deskpro Ticket CC Contacts")
+
+
+@grainy_model(namespace="peeringdb.organization")
+@reversion.register
+class Organization(ProtectedMixin, pdb_models.OrganizationBase, GeocodeBaseMixin):
+    """
+    Describes a peeringdb organization.
     """
 
     # FIXME: change this to ImageField - keep
     # FileField for now as the server doesn't have all the
     # dependencies installedd (libjpeg / Pillow)
     logo = models.FileField(
-        upload_to="logos/",
+        upload_to="logos_user_supplied/",
         null=True,
         blank=True,
         help_text=_(
@@ -613,11 +832,11 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
 
     def related_label(self):
         """
-        Used by grappelli autocomplete for representation
+        Used by grappelli autocomplete for representation.
 
-        Since grappelli doesnt easily allow us to filter status
-        during autocomplete lookup, we make sure the objects
-        are marked accordingly in the result
+        Since grappelli doesn't easily allow one to filter status
+        during autocomplete lookup, make sure the objects
+        are marked accordingly in the result.
         """
         if self.status == "deleted":
             return f"[DELETED] {self}"
@@ -627,14 +846,14 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
     def search_result_name(self):
         """
         This will be the name displayed for quick search matches
-        of this entity
+        of this entity.
         """
         return self.name
 
     @property
     def admin_url(self):
         """
-        Return the admin url for this organization (in /cp)
+        Return the admin URL for this organization (in /cp).
         """
         return django.urls.reverse(
             "admin:peeringdb_server_organization_change", args=(self.id,)
@@ -643,7 +862,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
     @property
     def view_url(self):
         """
-        Return the URL to this organizations web view
+        Return the URL to this organizations web view.
         """
         return "{}{}".format(
             settings.BASE_URL, django.urls.reverse("org-view", args=(self.id,))
@@ -655,7 +874,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
         Returns whether or not the organization is currently
         in a state where it can be marked as deleted.
 
-        This will be False for organization's of which ANY
+        This will be False for organizations of which ANY
         of the following is True:
 
         - has a network under it with status=ok
@@ -687,7 +906,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
     def owned(self):
         """
         Returns whether or not the organization has been claimed
-        by any users
+        by any users.
         """
         return self.admin_usergroup.user_set.count() > 0
 
@@ -695,7 +914,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
     def rdap_collect(self):
         """
         Fetche rdap results for all networks under this org and returns
-        them by asn
+        them by asn.
         """
         r = {}
         for net in self.net_set_active:
@@ -703,7 +922,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
                 rdap = RdapLookup().get_asn(net.asn)
                 if rdap:
                     r[net.asn] = rdap
-            except RdapNotFoundError as inst:
+            except RdapNotFoundError:
                 pass
         return r
 
@@ -712,7 +931,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
         """
         Returns all the websites for the org based on its
         website field and the website fields on all the entities it
-        owns
+        owns.
         """
         rv = []
         if self.website:
@@ -725,86 +944,75 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
         return list(set(rv))
 
     @property
-    def nsp_namespace_manage(self):
+    def grainy_namespace_manage(self):
         """
         Org administrators need CRUD to this namespace in order
         to execute administrative actions (user management, user permission
-        management)
+        management).
         """
-        return "peeringdb.manage_organization.%s" % self.id
-
-    @classmethod
-    def nsp_namespace_from_id(cls, id):
-        return "peeringdb.organization.%s" % id
+        return f"peeringdb.manage_organization.{self.id}"
 
     @property
     def pending_affiliations(self):
         """
         Returns queryset holding pending affiliations to this
-        organization
+        organization.
         """
         return self.affiliation_requests.filter(status="pending")
 
     @property
     def net_set_active(self):
         """
-        Returns queryset holding active networks in this organization
+        Returns queryset holding active networks in this organization.
         """
         return self.net_set(manager="handleref").filter(status="ok")
 
     @property
     def fac_set_active(self):
         """
-        Returns queryset holding active facilities in this organization
+        Returns queryset holding active facilities in this organization.
         """
         return self.fac_set(manager="handleref").filter(status="ok")
 
     @property
     def ix_set_active(self):
         """
-        Returns queryset holding active exchanges in this organization
+        Returns queryset holding active exchanges in this organization.
         """
         return self.ix_set(manager="handleref").filter(status="ok")
 
     @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this organization
-        """
-        return self.__class__.nsp_namespace_from_id(self.id)
-
-    @property
     def group_name(self):
         """
-        Returns usergroup name for this organization
+        Returns usergroup name for this organization.
         """
         return "org.%s" % self.id
 
     @property
     def admin_group_name(self):
         """
-        Returns admin usergroup name for this organization
+        Returns admin usergroup name for this organization.
         """
         return "%s.admin" % self.group_name
 
     @property
     def usergroup(self):
         """
-        Returns the usergroup for this organization
+        Returns the usergroup for this organization.
         """
         return Group.objects.get(name=self.group_name)
 
     @property
     def admin_usergroup(self):
         """
-        Returns the admin usergroup for this organization
+        Returns the admin usergroup for this organization.
         """
         return Group.objects.get(name=self.admin_group_name)
 
     @property
     def all_users(self):
         """
-        returns a set of all users in the org's user and admin groups
+        Returns a set of all users in the org's user and admin groups.
         """
         users = {}
         for user in self.usergroup.user_set.all():
@@ -815,27 +1023,10 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
         return sorted(list(users.values()), key=lambda x: x.full_name)
 
     @property
-    def nsp_ruleset(self):
-        """
-        Returns a dict containing rules for django namespace perms
-        to be used when applying perms to serialized oranization
-        data
-        """
-        return {
-            # since poc are stored in a list we need to specify a list
-            # handler for it, its a class function on NetworkContact that
-            # returns a relative permission namespace for each poc in the
-            # list
-            "list-handlers": {
-                "poc_set": {"namespace": NetworkContact.nsp_namespace_in_list}
-            }
-        }
-
-    @property
     def sponsorship(self):
         """
         Returns sponsorship object for this organization. If the organization
-        has no sponsorship ongoing return None
+        has no sponsorship ongoing return None.
         """
         now = datetime.datetime.now().replace(tzinfo=UTC())
         return (
@@ -846,9 +1037,10 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
 
     @classmethod
     @reversion.create_revision()
+    @transaction.atomic()
     def create_from_rdap(cls, rdap, asn, org_name=None):
         """
-        Creates organization from rdap result object
+        Creates organization from rdap result object.
         """
         name = rdap.org_name
         if not name:
@@ -866,7 +1058,7 @@ class Organization(ProtectedMixin, pdb_models.OrganizationBase):
 
 def default_time_s():
     """
-    Returns datetime set to today with a time of 00:00:00
+    Returns datetime set to today with a time of 00:00:00.
     """
     now = datetime.datetime.now()
     return now.replace(hour=0, minute=0, second=0, tzinfo=UTC())
@@ -874,16 +1066,52 @@ def default_time_s():
 
 def default_time_e():
     """
-    Returns datetime set to today with a time of 23:59:59
+    Returns datetime set to today with a time of 23:59:59.
     """
     now = datetime.datetime.now()
     return now.replace(hour=23, minute=59, second=59, tzinfo=UTC())
 
 
+class OrganizationAPIKey(AbstractAPIKey):
+    """
+    An API Key managed by an organization.
+    """
+
+    org = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="api_keys",
+    )
+    email = models.EmailField(
+        _("email address"), max_length=254, null=False, blank=False
+    )
+
+    class Meta(AbstractAPIKey.Meta):
+        verbose_name = "Organization API key"
+        verbose_name_plural = "Organization API keys"
+        db_table = "peeringdb_org_api_key"
+
+
+class OrganizationAPIPermission(Permission):
+    """
+    Describes permission for a OrganizationAPIKey.
+    """
+
+    class Meta:
+        verbose_name = _("Organization API key Permission")
+        verbose_name_plural = _("Organization API key Permission")
+        base_manager_name = "objects"
+
+    org_api_key = models.ForeignKey(
+        OrganizationAPIKey, related_name="grainy_permissions", on_delete=models.CASCADE
+    )
+    objects = PermissionManager()
+
+
 class Sponsorship(models.Model):
     """
     Allows an organization to be marked for sponsorship
-    for a designated timespan
+    for a designated timespan.
     """
 
     orgs = models.ManyToManyField(
@@ -909,7 +1137,7 @@ class Sponsorship(models.Model):
     def active_by_org(cls):
         """
         Yields (Organization, Sponsorship) for all currently
-        active sponsorships
+        active sponsorships.
         """
         now = datetime.datetime.now().replace(tzinfo=UTC())
         qset = cls.objects.filter(start_date__lte=now, end_date__gte=now)
@@ -926,9 +1154,16 @@ class Sponsorship(models.Model):
     @property
     def label(self):
         """
-        Returns the label for this sponsorship's level
+        Returns the label for this sponsorship's level.
         """
         return dict(SPONSORSHIP_LEVELS).get(self.level)
+
+    @property
+    def css(self):
+        """
+        Returns the css class for this sponsorship's level
+        """
+        return dict(SPONSORSHIP_CSS).get(self.level)
 
     def notify_expiration(self):
         """
@@ -962,7 +1197,7 @@ class Sponsorship(models.Model):
 
 class SponsorshipOrganization(models.Model):
     """
-    Describes an organization->sponsorship relationship
+    Describes an organization->sponsorship relationship.
     """
 
     org = models.ForeignKey(
@@ -992,9 +1227,9 @@ class SponsorshipOrganization(models.Model):
 
 class Partnership(models.Model):
     """
-    Allows an organization to be marked as a partner
+    Allows an organization to be marked as a partner.
 
-    It will appear on the "partners" page
+    It will appear on the "partners" page.
     """
 
     org = models.ForeignKey(
@@ -1032,7 +1267,7 @@ class Partnership(models.Model):
 class OrganizationMerge(models.Model):
     """
     When an organization is merged into another via admin.merge_organizations
-    it is logged here, allowing the merge to be undone
+    it is logged here, allowing the merge to be undone.
     """
 
     from_org = models.ForeignKey(
@@ -1050,9 +1285,9 @@ class OrganizationMerge(models.Model):
 
     def log_entity(self, entity, note=""):
         """
-        mark an entity as moved during this particular merge
+        Mark an entity as moved during this particular merge.
 
-        entity can be any handleref instance or a User instance
+        Entity can be any handleref instance or a User instance.
         """
 
         return OrganizationMergeEntity.objects.create(
@@ -1061,7 +1296,7 @@ class OrganizationMerge(models.Model):
 
     def undo(self):
         """
-        Undo this merge
+        Undo this merge.
         """
 
         # undelete original org
@@ -1089,7 +1324,7 @@ class OrganizationMerge(models.Model):
 class OrganizationMergeEntity(models.Model):
     """
     This holds the entities moved during an
-    organization merge stored in OrganizationMerge
+    organization merge stored in OrganizationMerge.
     """
 
     merge = models.ForeignKey(
@@ -1106,16 +1341,31 @@ class OrganizationMergeEntity(models.Model):
         verbose_name_plural = _("Organization Merge: Entities")
 
 
+@grainy_model(namespace="facility", parent="org")
 @reversion.register
 class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
     """
-    Describes a peeringdb facility
+    Describes a peeringdb facility.
     """
 
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name="fac_set"
     )
     website = models.URLField(_("Website"), blank=False)
+
+    ix_count = models.PositiveIntegerField(
+        _("number of exchanges at this facility"),
+        help_text=_("number of exchanges at this facility"),
+        null=False,
+        default=0,
+    )
+    net_count = models.PositiveIntegerField(
+        _("number of networks at this facility"),
+        help_text=_("number of networks at this facility"),
+        null=False,
+        default=0,
+    )
+
     # FIXME: delete cascade needs to be fixed in django-peeringdb, can remove
     # this afterwards
     class HandleRef:
@@ -1129,25 +1379,11 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
     def autocomplete_search_fields():
         """
         Returns a tuple of field query strings to be used during quick search
-        query
+        query.
         """
         return (
             "id__iexact",
             "name__icontains",
-        )
-
-    @classmethod
-    def nsp_namespace_in_list(cls):
-        """
-        Returns the permissioning namespace when a facility
-        is contained in list
-        """
-        return str(cls.id)
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, fac_id):
-        return "{}.facility.{}".format(
-            Organization.nsp_namespace_from_id(org_id), fac_id
         )
 
     @classmethod
@@ -1168,6 +1404,55 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
         return qset.filter(id__in=[i.facility_id for i in q])
 
     @classmethod
+    def not_related_to_net(cls, value=None, filt=None, field="network_id", qset=None):
+        """
+        Returns queryset of Facility objects that
+        are related to the network specified via net_id
+
+        Relationship through netfac -> net
+        """
+
+        if not qset:
+            qset = cls.handleref.undeleted()
+
+        filt = make_relation_filter(field, filt, value)
+
+        q = NetworkFacility.handleref.filter(**filt)
+        return qset.exclude(id__in=[i.facility_id for i in q])
+
+    @classmethod
+    def related_to_multiple_networks(
+        cls, value_list=None, field="network_id", qset=None
+    ):
+        """
+        Returns queryset of Facility objects that
+        are related to ALL networks specified in the value list
+        (a list of integer network ids).
+
+        Used in Advanced Search (ALL search).
+        Relationship through netfac -> net
+        """
+        if not len(value_list):
+            raise ValueError("List must contain at least one network id")
+
+        if not qset:
+            qset = cls.handleref.undeleted()
+
+        value = value_list.pop(0)
+        filt = make_relation_filter(field, None, value)
+        netfac_qset = NetworkFacility.handleref.filter(**filt)
+        final_queryset = qset.filter(id__in=[nf.facility_id for nf in netfac_qset])
+
+        # Need the intersection of the next networks
+        for value in value_list:
+            filt = make_relation_filter(field, None, value)
+            netfac_qset = NetworkFacility.handleref.filter(**filt)
+            fac_qset = qset.filter(id__in=[nf.facility_id for nf in netfac_qset])
+            final_queryset = final_queryset & fac_qset
+
+        return final_queryset
+
+    @classmethod
     def related_to_ix(cls, value=None, filt=None, field="ix_id", qset=None):
         """
         Returns queryset of Facility objects that
@@ -1185,12 +1470,29 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
         return qset.filter(id__in=[i.facility_id for i in q])
 
     @classmethod
+    def not_related_to_ix(cls, value=None, filt=None, field="ix_id", qset=None):
+        """
+        Returns queryset of Facility objects that
+        are related to the ixwork specified via ix_id
+
+        Relationship through ixfac -> ix
+        """
+
+        if not qset:
+            qset = cls.handleref.undeleted()
+
+        filt = make_relation_filter(field, filt, value)
+
+        q = InternetExchangeFacility.handleref.filter(**filt)
+        return qset.exclude(id__in=[i.facility_id for i in q])
+
+    @classmethod
     def overlapping_asns(cls, asns, qset=None):
         """
         Returns queryset of Facility objects
         that have a relationship to all asns specified in `asns`
 
-        Relationship through netfac
+        Relationship through netfac.
 
         Arguments:
             - asns <list>: list of asns
@@ -1235,16 +1537,9 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
         return qset.filter(id__in=shared_facilities)
 
     @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this facility
-        """
-        return self.__class__.nsp_namespace_from_id(self.org_id, self.id)
-
-    @property
     def sponsorship(self):
         """
-        Returns sponsorship oject for this facility (through the owning org)
+        Returns sponsorship oject for this facility (through the owning org).
         """
         return self.org.sponsorship
 
@@ -1252,15 +1547,15 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
     def search_result_name(self):
         """
         This will be the name displayed for quick search matches
-        of this entity
+        of this entity.
         """
         return self.name
 
     @property
     def netfac_set_active(self):
         """
-        Returns queryset of active NetworkFacility ojects connected to this
-        facility
+        Returns queryset of active NetworkFacility objects connected to this
+        facility.
         """
         return self.netfac_set.filter(status="ok")
 
@@ -1268,21 +1563,14 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
     def ixfac_set_active(self):
         """
         Returns queryset of active InternetExchangeFacility objects connected
-        to this facility
+        to this facility.
         """
         return self.ixfac_set.filter(status="ok")
 
     @property
-    def net_count(self):
-        """
-        Returns number of Networks at this facility
-        """
-        return self.netfac_set_active.count()
-
-    @property
     def view_url(self):
         """
-        Return the URL to this facility's web view
+        Return the URL to this facility's web view.
         """
         return "{}{}".format(
             settings.BASE_URL, django.urls.reverse("fac-view", args=(self.id,))
@@ -1321,29 +1609,69 @@ class Facility(ProtectedMixin, pdb_models.FacilityBase, GeocodeBaseMixin):
             self._not_deletable_reason = None
             return True
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["org"])
-
     def validate_phonenumbers(self):
         self.tech_phone = validate_phonenumber(self.tech_phone, self.country.code)
         self.sales_phone = validate_phonenumber(self.sales_phone, self.country.code)
 
 
+@grainy_model(namespace="internetexchange", parent="org")
 @reversion.register
 class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     """
-    Describes a peeringdb exchange
+    Describes a peeringdb exchange.
     """
+
+    ixf_import_request = models.DateTimeField(
+        _("Manual IX-F import request"),
+        help_text=_("Date of most recent manual import request"),
+        null=True,
+        blank=True,
+    )
+
+    ixf_import_request_status = models.CharField(
+        _("Manual IX-F import status"),
+        help_text=_("The current status of the manual ix-f import request"),
+        choices=(
+            ("queued", _("Queued")),
+            ("importing", _("Importing")),
+            ("finished", _("Finished")),
+        ),
+        max_length=32,
+        default="queued",
+    )
+
+    ixf_import_request_user = models.ForeignKey(
+        "peeringdb_server.User",
+        null=True,
+        blank=True,
+        help_text=_("The user that triggered the manual ix-f import request"),
+        on_delete=models.SET_NULL,
+        related_name="requested_ixf_imports",
+    )
 
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name="ix_set"
+    )
+
+    fac_count = models.PositiveIntegerField(
+        _("number of facilities at this exchange"),
+        help_text=_("number of facilities at this exchange"),
+        null=False,
+        default=0,
+    )
+
+    net_count = models.PositiveIntegerField(
+        _("number of networks at this exchange"),
+        help_text=_("number of networks at this exchange"),
+        null=False,
+        default=0,
     )
 
     @staticmethod
     def autocomplete_search_fields():
         """
         Returns a tuple of field query strings to be used during quick search
-        query
+        query.
         """
         return (
             "id__iexact",
@@ -1359,7 +1687,7 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
         Returns queryset of InternetExchange objects that
         are related to IXLan specified by ixlan_id
 
-        Relationship through ixlan
+        Relationship through ixlan.
         """
 
         if not qset:
@@ -1376,7 +1704,7 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
         Returns queryset of InternetExchange objects that
         are related to IXfac link specified by ixfac_id
 
-        Relationship through ixfac
+        Relationship through ixfac.
         """
 
         if not qset:
@@ -1420,10 +1748,60 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
         return qset.filter(id__in=[nx.ixlan.ix_id for nx in q])
 
     @classmethod
+    def related_to_multiple_networks(
+        cls, value_list=None, field="network_id", qset=None
+    ):
+        """
+        Returns queryset of InternetExchange objects that
+        are related to ALL networks specified in the value list
+        (a list of integer network ids).
+
+        Used in Advanced Search (ALL search).
+        Relationship through netixlan -> ixlan
+        """
+        if not len(value_list):
+            raise ValueError("List must contain at least one network id")
+
+        if not qset:
+            qset = cls.handleref.undeleted()
+
+        value = value_list.pop(0)
+        filt = make_relation_filter(field, None, value)
+        netixlan_qset = NetworkIXLan.handleref.filter(**filt).select_related("ixlan")
+        final_queryset = qset.filter(id__in=[nx.ixlan.ix_id for nx in netixlan_qset])
+
+        # Need the intersection of the next networks
+        for value in value_list:
+            filt = make_relation_filter(field, None, value)
+            netixlan_qset = NetworkIXLan.handleref.filter(**filt).select_related(
+                "ixlan"
+            )
+            ix_qset = qset.filter(id__in=[nx.ixlan.ix_id for nx in netixlan_qset])
+            final_queryset = final_queryset & ix_qset
+
+        return final_queryset
+
+    @classmethod
+    def not_related_to_net(cls, filt=None, value=None, field="network_id", qset=None):
+        """
+        Returns queryset of InternetExchange objects that
+        are not related to the network specified by network_id
+
+        Relationship through netixlan -> ixlan
+        """
+
+        if not qset:
+            qset = cls.handleref.undeleted()
+
+        filt = make_relation_filter(field, filt, value)
+        q = NetworkIXLan.handleref.filter(**filt).select_related("ixlan")
+        return qset.exclude(id__in=[nx.ixlan.ix_id for nx in q])
+
+    @classmethod
     def related_to_ipblock(cls, ipblock, qset=None):
         """
         Returns queryset of InternetExchange objects that
-        have ixlan prefixes matching the ipblock specified
+        have ixlan prefixes matching the ipblock specified.
 
         Relationship  through ixlan -> ixpfx
         """
@@ -1488,58 +1866,71 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
         return qset.filter(id__in=shared_exchanges)
 
     @classmethod
-    def filter_net_count(cls, filt=None, value=None, qset=None):
-
+    def filter_capacity(cls, filt=None, value=None, qset=None):
         """
-        Filter ix queryset by network count value
+        Returns queryset of InternetExchange objects filtered by capacity
+        in mbits.
 
-        Keyword Arguments:
-            - filt<str>: filter to apply: None, 'lt', 'gt', 'lte', 'gte'
-            - value<int>: value to filter by
-            - qset
+        Arguments:
 
-        Returns:
-            InternetExchange queryset
+        - filt (`str`|`None`): match operation, None meaning exact match
+          - 'gte': greater than equal
+          - 'lte': less than equal
+          - 'gt': greater than
+          - 'lt': less than
+        - value(`int`): capacity to filter in mbits
+        - qset(`InternetExchange`): if specified will filter ontop of
+          this existing query set
         """
 
         if not qset:
-            qset = cls.objects.filter(status="ok")
+            qset = cls.handleref.undeleted()
 
-        value = int(value)
+        # prepar field filters
 
-        if filt == "lt":
-            exchanges = [ix.id for ix in qset if ix.network_count < value]
-        elif filt == "gt":
-            exchanges = [ix.id for ix in qset if ix.network_count > value]
-        elif filt == "gte":
-            exchanges = [ix.id for ix in qset if ix.network_count >= value]
-        elif filt == "lte":
-            exchanges = [ix.id for ix in qset if ix.network_count <= value]
+        if filt:
+            filters = {f"capacity__{filt}": value}
         else:
-            exchanges = [ix.id for ix in qset if ix.network_count == value]
+            filters = {"capacity": value}
 
-        return qset.filter(pk__in=exchanges)
+        # find exchanges that have the matching capacity
+        # exchange capacity is simply the sum of its port speeds
 
-    @classmethod
-    def nsp_namespace_in_list(cls):
-        return str(cls.id)
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, ix_id):
-        """
-        Returns permissioning namespace for an exchange
-        """
-        return "{}.internetexchange.{}".format(
-            Organization.nsp_namespace_from_id(org_id),
-            ix_id,
+        netixlans = NetworkIXLan.handleref.undeleted()
+        capacity_set = (
+            netixlans.values("ixlan_id")
+            .annotate(capacity=models.Sum("speed"))
+            .filter(**filters)
         )
+
+        # collect ids
+        # since ixlan id == exchange id we can simply use those
+
+        qualifying = [c["ixlan_id"] for c in capacity_set]
+
+        # finally limit the queryset by the ix (ixlan) ids that matched
+        # the capacity filter
+
+        qset = qset.filter(id__in=qualifying)
+        return qset
+
+    @classmethod
+    def ixf_import_request_queue(cls, limit=0):
+        qset = InternetExchange.objects.filter(
+            ixf_import_request__isnull=False, ixf_import_request_status="queued"
+        ).order_by("ixf_import_request")
+
+        if limit:
+            qset = qset[:limit]
+
+        return qset
 
     @property
     def ixlan(self):
         """
-        Returns the ixlan for this exchange
+        Returns the ixlan for this exchange.
 
-        As per #21 each exchange will get one ixlan with a matching
+        As per #21, each exchange will get one ixlan with a matching
         id, but the schema is to remain unchanged until a major
         version bump.
         """
@@ -1548,7 +1939,7 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     @property
     def networks(self):
         """
-        Returns all active networks at this exchange
+        Returns all active networks at this exchange.
         """
         networks = []
         for ixlan in self.ixlan_set_active:
@@ -1560,23 +1951,14 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     def search_result_name(self):
         """
         This will be the name displayed for quick search matches
-        of this entity
+        of this entity.
         """
         return self.name
 
     @property
-    def network_count(self):
-        """
-        Returns count of networks at this exchange
-        """
-        qset = NetworkIXLan.objects.filter(ixlan__ix_id=self.id, status="ok")
-        qset = qset.values("network_id").annotate(count=models.Count("network_id"))
-        return len(qset)
-
-    @property
     def ixlan_set_active(self):
         """
-        Returns queryset of active ixlan objects at this exchange
+        Returns queryset of active ixlan objects at this exchange.
         """
         return self.ixlan_set(manager="handleref").filter(status="ok")
 
@@ -1584,14 +1966,14 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     def ixlan_set_active_or_pending(self):
         """
         Returns queryset of active or pending ixlan objects at
-        this exchange
+        this exchange.
         """
         return self.ixlan_set(manager="handleref").filter(status__in=["ok", "pending"])
 
     @property
     def ixfac_set_active(self):
         """
-        Returns queryset of active ixfac objects at this exchange
+        Returns queryset of active ixfac objects at this exchange.
         """
         return (
             self.ixfac_set(manager="handleref")
@@ -1600,26 +1982,52 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
         )
 
     @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this exchange
-        """
-        return self.__class__.nsp_namespace_from_id(self.org_id, self.id)
-
-    @property
     def sponsorship(self):
         """
-        Returns sponsorship object for this exchange (through owning org)
+        Returns sponsorship object for this exchange (through owning org).
         """
         return self.org.sponsorship
 
     @property
     def view_url(self):
         """
-        Return the URL to this facility's web view
+        Return the URL to this facility's web view.
         """
         return "{}{}".format(
             settings.BASE_URL, django.urls.reverse("ix-view", args=(self.id,))
+        )
+
+    @property
+    def derived_proto_unicast(self):
+        """
+        Returns a value for "proto_unicast" derived from the exchanges's
+        ixpfx records.
+
+        If the ix has a IPv4 ixpfx, proto_unicast should be True.
+        """
+        return self.ixlan.ixpfx_set_active.filter(protocol="IPv4").exists()
+
+    @property
+    def derived_proto_ipv6(self):
+        """
+        Returns a value for "proto_ipv6" derived from the exchanges's
+        ixpfx records.
+
+        If the ix has a IPv6 ixpfx, proto_ipv6 should be True.
+        """
+        return self.ixlan.ixpfx_set_active.filter(protocol="IPv6").exists()
+
+    @property
+    def derived_network_count(self):
+        """
+        Returns an ad hoc count of networks attached to an Exchange.
+        Used in the deletable property to ensure an accurate count
+        even if net_count signals are not being used.
+        """
+        return (
+            NetworkIXLan.objects.select_related("network")
+            .filter(ixlan__ix_id=self.id, status="ok")
+            .aggregate(net_count=models.Count("network_id", distinct=True))["net_count"]
         )
 
     @property
@@ -1643,20 +2051,54 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
                 "Exchange has active facility connection(s): {} ..."
             ).format(facility_names)
             return False
-        elif self.network_count > 0:
+        elif self.derived_network_count > 0:
             self._not_deletable_reason = _("Exchange has active peer(s)")
             return False
         else:
             self._not_deletable_reason = None
             return True
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["org"])
+    @property
+    def ixf_import_request_recent_status(self):
+        """
+        Returns the recent ixf import request status as a tuple
+        of value, display.
+        """
+
+        if not self.ixf_import_request:
+            return "", ""
+
+        value = self.ixf_import_request_status
+        display = self.get_ixf_import_request_status_display
+
+        if self.ixf_import_request_status == "queued":
+            return value, display
+
+        now = timezone.now()
+        delta = (now - self.ixf_import_request).total_seconds()
+
+        if delta < 3600:
+            return value, display
+
+        return "", ""
+
+    @property
+    def ixf_import_css(self):
+        """
+        Returns the appropriate bootstrap alert class
+        depending on recent import request status.
+        """
+        status, _ = self.ixf_import_request_recent_status
+        if status == "queued":
+            return "alert alert-warning"
+        if status == "finished":
+            return "alert alert-success"
+        return ""
 
     def vq_approve(self):
         """
         Called when internet exchange is approved in verification
-        queue
+        queue.
         """
 
         # since we are creating a pending ixland and prefix
@@ -1672,7 +2114,7 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     def save(self, create_ixlan=True, **kwargs):
         """
         When an internet exchange is saved, make sure the ixlan for it
-        exists
+        exists.
 
         Keyword Argument(s):
 
@@ -1699,11 +2141,23 @@ class InternetExchange(ProtectedMixin, pdb_models.InternetExchangeBase):
     def clean(self):
         self.validate_phonenumbers()
 
+    def request_ixf_import(self, user=None):
+        self.ixf_import_request = timezone.now()
 
+        if self.ixf_import_request_status == "importing":
+            raise ValidationError({"non_field_errors": ["Import is currently ongoing"]})
+
+        self.ixf_import_request_status = "queued"
+        self.ixf_import_request_user = user
+
+        self.save_without_timestamp()
+
+
+@grainy_model(namespace="ixfac", parent="ix")
 @reversion.register
 class InternetExchangeFacility(pdb_models.InternetExchangeFacilityBase):
     """
-    Describes facility to exchange relationship
+    Describes facility to exchange relationship.
     """
 
     ix = models.ForeignKey(
@@ -1713,41 +2167,61 @@ class InternetExchangeFacility(pdb_models.InternetExchangeFacilityBase):
         Facility, on_delete=models.CASCADE, default=0, related_name="ixfac_set"
     )
 
+    @classmethod
+    def related_to_name(cls, value=None, filt=None, field="facility__name", qset=None):
+        """
+        Filter queryset of ixfac objects related to facilities with name match
+        in facility__name according to filter.
+
+        Relationship through facility.
+        """
+        if not qset:
+            qset = cls.handleref.undeleted()
+        return qset.filter(**make_relation_filter(field, filt, value))
+
+    @classmethod
+    def related_to_country(
+        cls, value=None, filt=None, field="facility__country", qset=None
+    ):
+        """
+        Filter queryset of ixfac objects related to country via match
+        in facility__country according to filter.
+
+        Relationship through facility.
+        """
+        if not qset:
+            qset = cls.handleref.filter(status="ok")
+        return qset.filter(**make_relation_filter(field, filt, value))
+
+    @classmethod
+    def related_to_city(cls, value=None, filt=None, field="facility__city", qset=None):
+        """
+        Filter queryset of ixfac objects related to city via match
+        in facility__city according to filter.
+
+        Relationship through facility.
+        """
+        if not qset:
+            qset = cls.handleref.undeleted()
+        return qset.filter(**make_relation_filter(field, filt, value))
+
     @property
     def descriptive_name(self):
         """
-        Returns a descriptive label of the ixfac for logging purposes
+        Returns a descriptive label of the ixfac for logging purposes.
         """
         return f"ixfac{self.id} {self.ix.name} <-> {self.facility.name}"
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, ix_id, id):
-        """
-        Returns permissioning namespace for an ixfac
-        """
-        return "{}.fac.{}".format(
-            InternetExchange.nsp_namespace_from_id(org_id, ix_id), id
-        )
-
-    @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this ixfac
-        """
-        return self.__class__.nsp_namespace_from_id(self.ix.org_id, self.ix.id, self.id)
-
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["ix"])
 
     class Meta:
         unique_together = ("ix", "facility")
         db_table = "peeringdb_ix_facility"
 
 
+@grainy_model(namespace="ixlan", namespace_instance="{instance.ix.grainy_namespace}")
 @reversion.register
 class IXLan(pdb_models.IXLanBase):
     """
-    Describes a LAN at an exchange
+    Describes a LAN at an exchange.
     """
 
     # as we are preparing to drop IXLans from the schema, as an interim
@@ -1794,14 +2268,14 @@ class IXLan(pdb_models.IXLanBase):
         db_table = "peeringdb_ixlan"
 
     @classmethod
-    def api_cache_permissions_applicator(cls, row, ns, user):
+    def api_cache_permissions_applicator(cls, row, ns, permission_holder):
 
         """
         Applies permissions to a row in an api-cache result
         set for ixlan.
 
         This will strip `ixf_ixp_member_list_url` fields for
-        users that don't have read permissions for them according
+        users / api keys that don't have read permissions for them according
         to `ixf_ixp_member_list_url_visible`
 
         Argument(s):
@@ -1809,15 +2283,15 @@ class IXLan(pdb_models.IXLanBase):
         - row (dict): ixlan row from api-cache result
         - ns (str): ixlan namespace as determined during api-cache
           result rendering
-        - user (User)
+        - permission_holder (User or API Key)
         """
 
         visible = row.get("ixf_ixp_member_list_url_visible").lower()
-        if not user and visible == "public":
+        if not permission_holder and visible == "public":
             return
         namespace = f"{ns}.ixf_ixp_member_list_url.{visible}"
 
-        if not has_perms(user, namespace, 0x01, explicit=True):
+        if not check_permissions(permission_holder, namespace, "r", explicit=True):
             try:
                 del row["ixf_ixp_member_list_url"]
             except KeyError:
@@ -1826,47 +2300,28 @@ class IXLan(pdb_models.IXLanBase):
     @property
     def descriptive_name(self):
         """
-        Returns a descriptive label of the ixlan for logging purposes
+        Returns a descriptive label of the ixlan for logging purposes.
         """
         return f"ixlan{self.id} {self.ix.name}"
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, ix_id, id):
-        """
-        Returns permissioning namespace for an ixlan
-        """
-
-        # ixlan will be removed in v3 and we are already only allowing
-        # one ixlan per ix with matching ids so it makes sense to
-        # simply use the exchange's permissioning namespace here
-
-        return InternetExchange.nsp_namespace_from_id(org_id, ix_id)
-
-    @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this ixlan
-        """
-        return self.__class__.nsp_namespace_from_id(self.ix.org_id, self.ix_id, self.id)
 
     @property
     def ixpfx_set_active(self):
         """
-        Returns queryset of active prefixes at this ixlan
+        Returns queryset of active prefixes at this ixlan.
         """
         return self.ixpfx_set(manager="handleref").filter(status="ok")
 
     @property
     def ixpfx_set_active_or_pending(self):
         """
-        Returns queryset of active or pending prefixes at this ixlan
+        Returns queryset of active or pending prefixes at this ixlan.
         """
         return self.ixpfx_set(manager="handleref").filter(status__in=["ok", "pending"])
 
     @property
     def netixlan_set_active(self):
         """
-        Returns queryset of active netixlan objects at this ixlan
+        Returns queryset of active netixlan objects at this ixlan.
         """
         return (
             self.netixlan_set(manager="handleref")
@@ -1881,29 +2336,19 @@ class IXLan(pdb_models.IXLanBase):
     def autocomplete_search_fields():
         """
         Used by grappelli autocomplete to determine what
-        fields to search in
+        fields to search in.
         """
         return ("ix__name__icontains",)
 
-    def ixf_ixp_member_list_url_viewable(self, user):
-        visible = self.ixf_ixp_member_list_url_visible.lower()
-        if not user and visible == "public":
-            return True
-        namespace = f"{self.nsp_namespace}.ixf_ixp_member_list_url.{visible}"
-        return has_perms(user, namespace, 0x01, explicit=True)
-
     def related_label(self):
         """
-        Used by grappelli autocomplete for representation
+        Used by grappelli autocomplete for representation.
         """
         return f"{self.ix.name} IXLan ({self.id})"
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["ix"])
-
     def test_ipv4_address(self, ipv4):
         """
-        test that the ipv4 address exists in one of the prefixes in this ixlan
+        Test that the ipv4 a exists in one of the prefixes in this ixlan.
         """
         for pfx in self.ixpfx_set_active:
             if pfx.test_ip_address(ipv4):
@@ -1912,7 +2357,7 @@ class IXLan(pdb_models.IXLanBase):
 
     def test_ipv6_address(self, ipv6):
         """
-        test that the ipv6 address exists in one of the prefixes in this ixlan
+        Test that the ipv6 address exists in one of the prefixes in this ixlan.
         """
         for pfx in self.ixpfx_set_active:
             if pfx.test_ip_address(ipv6):
@@ -1921,7 +2366,6 @@ class IXLan(pdb_models.IXLanBase):
 
     def clean(self):
         # id is set and does not match the parent ix id
-
         if self.id and self.id != self.ix.id:
             raise ValidationError({"id": _("IXLan id needs to match parent ix id")})
 
@@ -1938,16 +2382,24 @@ class IXLan(pdb_models.IXLanBase):
 
         self.id = self.ix.id
 
+        if self.ixf_ixp_member_list_url is None and self.ixf_ixp_import_enabled:
+            raise ValidationError(
+                _(
+                    "Cannot enable IX-F import without specifying the IX-F member list url"
+                )
+            )
+
         return super().clean()
 
     @reversion.create_revision()
+    @transaction.atomic()
     def add_netixlan(self, netixlan_info, save=True, save_others=True):
         """
         This function allows for sane adding of netixlan object under
         this ixlan.
 
         It will take into account whether an ipaddress can be claimed from a
-        soft-deleted netixlan or whether or not an object already exists
+        soft-deleted netixlan or whether an object already exists
         that should be updated instead of creating a new netixlan instance.
 
         Arguments:
@@ -2067,7 +2519,6 @@ class IXLan(pdb_models.IXLanBase):
                 ixlan=self, network=netixlan_info.network, status="ok"
             )
             created = True
-            reason = "New ip-address"
 
         # now we sync the data to our determined netixlan instance
 
@@ -2077,14 +2528,17 @@ class IXLan(pdb_models.IXLanBase):
             # we need to check if this ipaddress exists on a
             # soft-deleted netixlan elsewhere, and
             # reset if so.
+            #
+            # we only do this if ipaddr4 is not null
 
-            for other in NetworkIXLan.objects.filter(
-                ipaddr4=ipv4, status="deleted"
-            ).exclude(asn=asn):
-                other.ipaddr4 = None
-                other.notes = f"Ip address {ipv4} was claimed by other netixlan"
-                if save or save_others:
-                    other.save()
+            if ipv4:
+                for other in NetworkIXLan.objects.filter(
+                    ipaddr4=ipv4, status="deleted"
+                ).exclude(asn=asn):
+                    other.ipaddr4 = None
+                    other.notes = f"Ip address {ipv4} was claimed by other netixlan"
+                    if save or save_others:
+                        other.save()
 
             netixlan.ipaddr4 = ipv4
             changed.append("ipaddr4")
@@ -2095,14 +2549,18 @@ class IXLan(pdb_models.IXLanBase):
             # we need to check if this ipaddress exists on a
             # soft-deleted netixlan elsewhere, and
             # reset if so.
+            #
+            # we only do this if ipaddr6 is not None
 
-            for other in NetworkIXLan.objects.filter(
-                ipaddr6=ipv6, status="deleted"
-            ).exclude(asn=asn):
-                other.ipaddr6 = None
-                other.notes = f"Ip address {ipv6} was claimed by other netixlan"
-                if save or save_others:
-                    other.save()
+            if ipv6:
+
+                for other in NetworkIXLan.objects.filter(
+                    ipaddr6=ipv6, status="deleted"
+                ).exclude(asn=asn):
+                    other.ipaddr6 = None
+                    other.notes = f"Ip address {ipv6} was claimed by other netixlan"
+                    if save or save_others:
+                        other.save()
 
             netixlan.ipaddr6 = ipv6
             changed.append("ipaddr6")
@@ -2145,7 +2603,7 @@ class IXLan(pdb_models.IXLanBase):
 class IXLanIXFMemberImportAttempt(models.Model):
     """
     Holds information about the most recent ixf member import
-    attempt for an ixlan
+    attempt for an ixlan.
     """
 
     ixlan = models.OneToOneField(
@@ -2160,8 +2618,8 @@ class IXLanIXFMemberImportAttempt(models.Model):
 
 class IXLanIXFMemberImportLog(models.Model):
     """
-    Import log of a IXF member import that changed or added at least one
-    netixlan under the specified ixlans
+    Import log of a IX-F member import that changed or added at least one
+    netixlan under the specified ixlans.
     """
 
     ixlan = models.ForeignKey(
@@ -2171,13 +2629,14 @@ class IXLanIXFMemberImportLog(models.Model):
     updated = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = _("IXF Import Log")
-        verbose_name_plural = _("IXF Import Logs")
+        verbose_name = _("IX-F Import Log")
+        verbose_name_plural = _("IX-F Import Logs")
 
     @reversion.create_revision()
+    @transaction.atomic()
     def rollback(self):
         """
-        Attempt to rollback the changes described in this log
+        Attempt to rollback the changes described in this log.
         """
 
         for entry in self.entries.all().order_by("-id"):
@@ -2190,7 +2649,7 @@ class IXLanIXFMemberImportLog(models.Model):
                     for _entry in related.order_by("-id"):
                         try:
                             _entry.version_before.revert()
-                        except:
+                        except Exception:
                             break
 
                 elif entry.netixlan.status == "ok":
@@ -2201,9 +2660,9 @@ class IXLanIXFMemberImportLog(models.Model):
 
 class IXLanIXFMemberImportLogEntry(models.Model):
     """
-    IXF member import log entry that holds the affected netixlan and
+    IX-F member import log entry that holds the affected netixlan and
     the netixlan's version after the change, which can be used to rollback
-    the change
+    the change.
     """
 
     log = models.ForeignKey(
@@ -2229,16 +2688,16 @@ class IXLanIXFMemberImportLogEntry(models.Model):
     reason = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
-        verbose_name = _("IXF Import Log Entry")
-        verbose_name_plural = _("IXF Import Log Entries")
+        verbose_name = _("IX-F Import Log Entry")
+        verbose_name_plural = _("IX-F Import Log Entries")
 
     @property
     def changes(self):
         """
         Returns a dict of changes between the netixlan version
-        saved by the ix-f import and the version before
+        saved by the ix-f import and the version before.
 
-        Fields `created`, `updated` and `version` will be ignored
+        Fields `created`, `updated` and `version` will be ignored.
         """
         if not self.version_before:
             return {}
@@ -2276,8 +2735,8 @@ class IXLanIXFMemberImportLogEntry(models.Model):
 
 class NetworkProtocolsDisabled(ValueError):
     """
-    raised when a network has both ipv6 and ipv4 support
-    disabled during ix-f import
+    Raised when a network has both ipv6 and ipv4 support
+    disabled during ix-f import.
     """
 
 
@@ -2357,8 +2816,8 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
     class Meta:
         db_table = "peeringdb_ixf_member_data"
-        verbose_name = _("IXF Member Data")
-        verbose_name_plural = _("IXF Member Data")
+        verbose_name = _("IX-F Member Data")
+        verbose_name_plural = _("IX-F Member Data")
 
     class HandleRef:
         tag = "ixfmember"
@@ -2366,9 +2825,9 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     @classmethod
     def id_filters(cls, asn, ipaddr4, ipaddr6, check_protocols=True):
         """
-        returns a dict of filters to use with a
+        Returns a dict of filters to use with a
         IXFMemberData or NetworkIXLan query set
-        to retrieve a unique entry
+        to retrieve a unique entry.
         """
 
         net = Network.objects.get(asn=asn)
@@ -2399,9 +2858,9 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
         It will take into consideration whether or not an instance
         for this object already exists (as identified by asn and ip
-        addresses)
+        addresses).
 
-        It will also update the value of `fetched` to now
+        It will also update the value of `fetched` to now.
 
         Keyword Argument(s):
 
@@ -2490,8 +2949,8 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     @classmethod
     def get_for_network(cls, net):
         """
-        Returns aueryset for IXFMemberData objects that match
-        a network's asn
+        Returns queryset for IXFMemberData objects that match
+        a network's asn.
 
         Argument(s):
 
@@ -2503,7 +2962,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def dismissed_for_network(cls, net):
         """
         Returns queryset for IXFMemberData objects that match
-        a network's asn and are currenlty flagged as dismissed
+        a network's asn and are currenlty flagged as dismissed.
 
         Argument(s):
 
@@ -2518,7 +2977,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Returns whether or not the specified network has
         any dismissed IXFMemberData suggestions that are
-        actionable
+        actionable.
 
         Argument(s):
 
@@ -2534,7 +2993,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def proposals_for_network(cls, net):
         """
         Returns a dict containing actionable proposals for
-        a network
+        a network.
 
         ```
         {
@@ -2559,7 +3018,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         for ixf_member_data in qset:
 
             action = ixf_member_data.action
-            error = ixf_member_data.error
+            ixf_member_data.error
 
             # not actionable for anyone
 
@@ -2609,7 +3068,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def net(self):
         """
         Returns the Network instance related to
-        this entry
+        this entry.
         """
 
         if not hasattr(self, "_net"):
@@ -2621,7 +3080,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Returns whether or not the proposed action by
         this IXFMemberData instance is actionable by
-        the network
+        the network.
         """
         error = self.error
 
@@ -2643,7 +3102,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         by exchange or network.
 
         If actionable will return self.error otherwise
-        will return None
+        will return None.
         """
 
         if not self.error:
@@ -2651,7 +3110,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
         try:
             error_data = json.loads(self.error)
-        except:
+        except Exception:
             return None
 
         IPADDR_EXIST = "already exists"
@@ -2687,7 +3146,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Returns a list of email addresses that
         are suitable contact points for conflict resolution
-        at the network's end
+        at the network's end.
         """
         qset = self.net.poc_set_active.exclude(email="")
         qset = qset.exclude(email__isnull=True)
@@ -2709,7 +3168,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Returns a list of email addresses that
         are suitable contact points for conflict resolution
-        at the exchange end
+        at the exchange end.
         """
         return [self.ix.tech_email or self.ix.policy_email]
 
@@ -2717,7 +3176,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def ix(self):
         """
         Returns the InternetExchange instance related to
-        this entry
+        this entry.
         """
 
         if not hasattr(self, "_ix"):
@@ -2729,7 +3188,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
         """
         Returns a tuple that identifies the ix-f member
-        as a unqiue record by asn, ip4 and ip6 address
+        as a unqiue record by asn, ip4 and ip6 address.
         """
 
         return (self.asn, self.ipaddr4, self.ipaddr6)
@@ -2744,7 +3203,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     @property
     def actionable_changes(self):
 
-        requirements = self.requirements
+        self.requirements
 
         _changes = self.changes
 
@@ -2763,9 +3222,9 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
         """
         Returns a dict of changes (field, value)
-        between this entry and the related netixlan
+        between this entry and the related netixlan.
 
-        If an empty dict is returned that means no changes
+        If an empty dict is returned that means no changes.
 
         ```
         {
@@ -2813,7 +3272,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def modify_speed(self):
         """
         Returns whether or not the `speed` property
-        is enabled to receive modify updates or not (#793)
+        is enabled to receive modify updates or not (#793).
         """
         return False
 
@@ -2821,7 +3280,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def modify_is_rs_peer(self):
         """
         Returns whether or not the `is_rs_peer` property
-        is enabled to receive modify updates or not (#793)
+        is enabled to receive modify updates or not (#793).
         """
         return False
 
@@ -2829,7 +3288,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def changed_fields(self):
         """
         Returns a comma separated string of field names
-        for changes proposed by this IXFMemberData instance
+        for changes proposed by this IXFMemberData instance.
         """
         return ", ".join(list(self.changes.keys()))
 
@@ -2837,9 +3296,9 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def remote_changes(self):
         """
         Returns a dict of changed fields between previously
-        fetched IX-F data and current IX-F data
+        fetched IX-F data and current IX-F data.
 
-        If an empty dict is returned that means no changes
+        If an empty dict is returned that means no changes.
 
         ```
         {
@@ -2870,7 +3329,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         had data at the IX-F source.
 
         If not it indicates that it does not exist at the
-        ix-f source
+        ix-f source.
         """
 
         return self.data == "{}" or not self.data
@@ -2882,7 +3341,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         the related netixlan should be removed.
 
         We do this by checking if the ix-f data was provided
-        or not
+        or not.
         """
 
         if not self.netixlan.id or self.netixlan.status == "deleted":
@@ -2900,7 +3359,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         Returns whether or not the network associated with
         this IXFMemberData instance currently has a presence
         at the exchange associated with this IXFMemberData
-        instance
+        instance.
         """
         return NetworkIXLan.objects.filter(
             ixlan=self.ixlan, network=self.net, status="ok"
@@ -2910,12 +3369,12 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def action(self):
         """
         Returns the implied action of applying this
-        entry to peeringdb
+        entry to peeringdb.
 
         Will return either "add", "modify", "delete" or "noop"
         """
 
-        has_data = self.remote_data_missing == False
+        has_data = self.remote_data_missing is False
 
         action = "noop"
 
@@ -2950,7 +3409,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def has_requirements(self):
         """
         Return whether or not this IXFMemberData has
-        other IXFMemberData objects as requirements
+        other IXFMemberData objects as requirements.
         """
 
         return len(self.requirements) > 0
@@ -2960,7 +3419,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Returns list of all IXFMemberData objects
         that are still active requirements for this
-        IXFMemberData object
+        IXFMemberData object.
         """
         return [
             requirement
@@ -2973,7 +3432,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Return the initial requirement IXFMemberData
         for this IXFMemberData instance, None if there
-        isn't any
+        isn't any.
         """
         try:
             return self.requirements[0]
@@ -2987,7 +3446,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         objects for this IXFMemberData object. Currently this
         only happens on add proposals that require two netixlans
         to be deleted because both ipaddresses exist on separate
-        netixlans (#770)
+        netixlans (#770).
         """
         return self.requirements[1:]
 
@@ -2995,7 +3454,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def ipaddr4_on_requirement(self):
         """
         Returns true if the ipv4 address claimed by this IXFMemberData
-        object exists on one of it's requirement IXFMemberData objects
+        object exists on one of its requirement IXFMemberData objects.
         """
 
         ipaddr4 = self.ipaddr4
@@ -3013,7 +3472,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def ipaddr6_on_requirement(self):
         """
         Returns true if the ipv6 address claimed by this IXFMemberData
-        object exists on one of it's requirement IXFMemberData objects
+        object exists on one of its requirement IXFMemberData objects.
         """
 
         ipaddr6 = self.ipaddr6
@@ -3038,7 +3497,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         Any new netixlan will NOT be saved at this point.
 
         Note that the netixlan that matched may be currently
-        soft-deleted (status=="deleted")
+        soft-deleted (status=="deleted").
         """
 
         if not hasattr(self, "_netixlan"):
@@ -3107,7 +3566,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def set_requirement(self, ixf_member_data, save=True):
         """
         Sets another IXFMemberData object to be a requirement
-        of the resolution of this IXFMemberData object
+        of the resolution of this IXFMemberData object.
         """
         if not ixf_member_data:
             return
@@ -3127,7 +3586,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
     def apply_requirements(self, save=True):
         """
-        Apply all requirements
+        Apply all requirements.
         """
 
         for requirement in self.requirements:
@@ -3138,10 +3597,10 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         Applies the data.
 
         This will either create, update or delete a netixlan
-        object
+        object.
 
         Will return a dict containing action and netixlan
-        affected
+        affected.
 
         ```
         {
@@ -3160,7 +3619,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
           if this is True
         """
 
-        if user:
+        if user and user.is_authenticated:
             reversion.set_user(user)
 
         if comment:
@@ -3170,7 +3629,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
         action = self.action
         netixlan = self.netixlan
-        changes = self.changes
+        self.changes
 
         if action == "add":
             self.validate_speed()
@@ -3211,13 +3670,13 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def validate_speed(self):
         """
         Speed errors in ix-f data are raised during parse
-        and speed will be on the attribute
+        and speed will be on the attribute.
 
-        In order to properly handle invalid speed values
-        we check if speed is 0 and if there was a parsing
-        error for it, and if so raise a validation error
+        In order to properly handle invalid speed values,
+        check if speed is 0 and if there was a parsing
+        error for it, and if so raise a validation error.
 
-        TODO: find a better way to do this
+        TODO: find a better way to do this.
         """
         if self.speed == 0 and self.error:
             error_data = json.loads(self.error)
@@ -3244,10 +3703,10 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
     def set_resolved(self, save=True):
         """
         Marks this IXFMemberData instance as resolved and
-        send out notifications to ac,ix and net if
-        warranted
+        sends out notifications to ac,ix and net if
+        warranted.
 
-        this will delete the IXFMemberData instance
+        This will delete the IXFMemberData instance.
         """
         if self.id and save and not self.requirement_of_id:
             self.delete(hard=True)
@@ -3257,8 +3716,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Persist this IXFMemberData instance and send out notifications
         for conflict (validation issues) for modifications proposed
-        to the corresponding netixlan to ac, ix and net as warranted
-        as warranted
+        to the corresponding netixlan to ac, ix and net as warranted.
         """
 
         if not self.id:
@@ -3299,7 +3757,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Persist this IXFMemberData instance and send out notifications
         for proposed modification to the corresponding netixlan
-        instance to ac, ix and net as warranted
+        instance to ac, ix and net as warranted.
         """
         self.reason = reason
         if ((self.changes and not self.id) or self.remote_changes) and save:
@@ -3320,7 +3778,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Persist this IXFMemberData instance and send out notifications
         for proposed creation of netixlan instance to ac, ix and net
-        as warranted
+        as warranted.
         """
         self.reason = reason
 
@@ -3343,7 +3801,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
         """
         Persist this IXFMemberData instance and send out notifications
         for proposed removal of netixlan instance to ac, net and ix
-        as warranted
+        as warranted.
         """
         self.reason = reason
 
@@ -3369,14 +3827,14 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 
     def set_data(self, data):
         """
-        Stores a dict in self.data as a json string
+        Stores a dict in self.data as a json string.
         """
         self.data = json.dumps(data)
 
     def render_notification(self, template_file, recipient, context=None):
         """
         Renders notification text for this ixfmemberdata
-        instance
+        instance.
 
         Argument(s):
 
@@ -3389,6 +3847,7 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
             "instance": self,
             "recipient": recipient,
             "ixf_url": self.ixlan.ixf_ixp_member_list_url,
+            "ixf_url_public": (self.ixlan.ixf_ixp_member_list_url_visible == "Public"),
         }
         if context:
             _context.update(context)
@@ -3421,10 +3880,14 @@ class IXFMemberData(pdb_models.NetworkIXLanBase):
 # validate could check
 
 
+@grainy_model(
+    namespace="prefix",
+    namespace_instance="{instance.ixlan.grainy_namespace}.{namespace}.{instance.pk}",
+)
 @reversion.register
 class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
     """
-    Descries a Prefix at an Exchange LAN
+    Descries a Prefix at an Exchange LAN.
     """
 
     ixlan = models.ForeignKey(
@@ -3438,25 +3901,15 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
     @property
     def descriptive_name(self):
         """
-        Returns a descriptive label of the ixpfx for logging purposes
+        Returns a descriptive label of the ixpfx for logging purposes.
         """
         return f"ixpfx{self.id} {self.prefix}"
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, ix_id, ixlan_id, id):
-        """
-        Returns permissioning namespace for an ixpfx
-        """
-        return "{}.prefix.{}".format(
-            IXLan.nsp_namespace_from_id(org_id, ix_id, ixlan_id),
-            id,
-        )
 
     @classmethod
     def related_to_ix(cls, value=None, filt=None, field="ix_id", qset=None):
         """
         Filter queryset of ixpfx objects related to exchange via ix_id match
-        according to filter
+        according to filter.
 
         Relationship through ixlan -> ix
         """
@@ -3469,7 +3922,7 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
     def whereis_ip(cls, ipaddr, qset=None):
         """
         Filter queryset of ixpfx objects where the prefix contains
-        the supplied ipaddress
+        the supplied ipaddress.
         """
 
         if not qset:
@@ -3485,24 +3938,12 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
 
         return qset.filter(id__in=ids)
 
-    @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this ixpfx
-        """
-        return self.nsp_namespace_from_id(
-            self.ixlan.ix.org_id, self.ixlan.ix.id, self.ixlan.id, self.id
-        )
-
     def __str__(self):
         return f"{self.prefix}"
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["ixlan"])
-
     def test_ip_address(self, addr):
         """
-        Checks if this prefix can contain the specified ip address
+        Checks if this prefix can contain the specified ip address.
 
         Arguments:
             - addr (ipaddress.IPv4Address or ipaddress.IPv6Address or unicode): ip address
@@ -3524,7 +3965,7 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
         except ipaddress.AddressValueError:
             return False
 
-        except ValueError as inst:
+        except ValueError:
             return False
 
     @property
@@ -3565,7 +4006,7 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
 
     def clean(self):
         """
-        Custom model validation
+        Custom model validation.
         """
 
         status_error = _(
@@ -3583,10 +4024,11 @@ class IXLanPrefix(ProtectedMixin, pdb_models.IXLanPrefixBase):
         return super().clean()
 
 
+@grainy_model(namespace="network", parent="org")
 @reversion.register
 class Network(pdb_models.NetworkBase):
     """
-    Describes a peeringdb network
+    Describes a peeringdb network.
     """
 
     org = models.ForeignKey(
@@ -3598,6 +4040,24 @@ class Network(pdb_models.NetworkBase):
         help_text=_(
             "Specifies whether an IXP is allowed to add a netixlan entry for this network via their ixp_member data"
         ),
+    )
+
+    netixlan_updated = models.DateTimeField(blank=True, null=True)
+    netfac_updated = models.DateTimeField(blank=True, null=True)
+    poc_updated = models.DateTimeField(blank=True, null=True)
+
+    ix_count = models.PositiveIntegerField(
+        _("number of exchanges at this network"),
+        help_text=_("number of exchanges at this network"),
+        null=False,
+        default=0,
+    )
+
+    fac_count = models.PositiveIntegerField(
+        _("number of facilities at this network"),
+        help_text=_("number of facilities at this network"),
+        null=False,
+        default=0,
     )
 
     @staticmethod
@@ -3612,9 +4072,10 @@ class Network(pdb_models.NetworkBase):
 
     @classmethod
     @reversion.create_revision()
+    @transaction.atomic()
     def create_from_rdap(cls, rdap, asn, org):
         """
-        Creates network from rdap result object
+        Creates network from rdap result object.
         """
         name = rdap.name
         if not rdap.name:
@@ -3624,12 +4085,6 @@ class Network(pdb_models.NetworkBase):
         else:
             net = cls.objects.create(org=org, asn=asn, name=name, status="ok")
         return net, True
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, net_id):
-        return "{}.network.{}".format(
-            Organization.nsp_namespace_from_id(org_id), net_id
-        )
 
     @classmethod
     def related_to_fac(cls, value=None, filt=None, field="facility_id", qset=None):
@@ -3684,7 +4139,7 @@ class Network(pdb_models.NetworkBase):
         Filter queryset of Network objects related to the netixlan link
         specified by netixlan_id
 
-        Relationship through netixlan
+        Relationship through netixlan.
         """
         if not qset:
             qset = cls.handleref.undeleted()
@@ -3723,6 +4178,7 @@ class Network(pdb_models.NetworkBase):
             qset = cls.handleref.undeleted()
 
         filt = make_relation_filter("ixlan__%s" % field, filt, value)
+
         q = NetworkIXLan.handleref.select_related("ixlan").filter(**filt)
         return qset.filter(id__in=[i.network_id for i in q])
 
@@ -3730,7 +4186,7 @@ class Network(pdb_models.NetworkBase):
     def not_related_to_ix(cls, value=None, filt=None, field="ix_id", qset=None):
         """
         Filter queryset of Network objects not related to the ix
-        specified by ix_id (as in networks not present at the exchange)
+        specified by ix_id (as in networks not present at the exchange).
 
         Relationship through netixlan -> ixlan -> ix
         """
@@ -3745,7 +4201,7 @@ class Network(pdb_models.NetworkBase):
     @classmethod
     def as_set_map(cls, qset=None):
         """
-        Returns a dict mapping asns to their irr_as_set value
+        Returns a dict mapping asns to their irr_as_set value.
         """
         if not qset:
             qset = cls.objects.filter(status="ok").order_by("asn")
@@ -3755,7 +4211,7 @@ class Network(pdb_models.NetworkBase):
     def search_result_name(self):
         """
         This will be the name displayed for quick search matches
-        of this entity
+        of this entity.
         """
 
         return f"{self.name} ({self.asn})"
@@ -3772,7 +4228,7 @@ class Network(pdb_models.NetworkBase):
     def ixlan_set_active(self):
         """
         Returns IXLan queryset for ixlans connected to this network
-        through NetworkIXLan
+        through NetworkIXLan.
         """
         ixlan_ids = []
         for netixlan in self.netixlan_set_active:
@@ -3784,7 +4240,7 @@ class Network(pdb_models.NetworkBase):
     def ixlan_set_ixf_enabled(self):
         """
         Returns IXLan queryset for IX-F import enabled ixlans connected
-        to this network throught NetworkIXLan
+        to this network through NetworkIXLan.
         """
         qset = self.ixlan_set_active.filter(ixf_ixp_import_enabled=True)
         qset = qset.exclude(ixf_ixp_member_list_url__isnull=True)
@@ -3793,34 +4249,6 @@ class Network(pdb_models.NetworkBase):
     @property
     def poc_set_active(self):
         return self.poc_set(manager="handleref").filter(status="ok")
-
-    @property
-    def nsp_namespace(self):
-        """
-        Returns a custom permission namespace for an instance of this
-        model
-        """
-
-        return self.__class__.nsp_namespace_from_id(self.org_id, self.id)
-
-    @property
-    def nsp_ruleset(self):
-        """
-        Ruleset to apply when applying permissions to the serialized
-        data of this model
-        """
-
-        return {
-            # we require explicit perms to private network contacts
-            "require": {"poc_set.users": 0x01, "poc_set.private": 0x01},
-            # since poc are stored in a list we need to specify a list
-            # handler for it, its a class function on NetworkContact that
-            # returns a relative permission namespace for each poc in the
-            # list
-            "list-handlers": {
-                "poc_set": {"namespace": NetworkContact.nsp_namespace_in_list}
-            },
-        }
 
     @property
     def ipv4_support(self):
@@ -3851,7 +4279,7 @@ class Network(pdb_models.NetworkBase):
     @property
     def view_url(self):
         """
-        Return the URL to this networks web view
+        Return the URL to this networks web view.
         """
         return "{}{}".format(
             settings.BASE_URL, django.urls.reverse("net-view", args=(self.id,))
@@ -3860,18 +4288,15 @@ class Network(pdb_models.NetworkBase):
     @property
     def view_url_asn(self):
         """
-        Return the URL to this networks web view
+        Return the URL to this networks web view.
         """
         return "{}{}".format(
             settings.BASE_URL, django.urls.reverse("net-view-asn", args=(self.asn,))
         )
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["org"])
-
     def clean(self):
         """
-        Custom model validation
+        Custom model validation.
         """
 
         try:
@@ -3894,10 +4319,15 @@ class Network(pdb_models.NetworkBase):
 
 
 # class NetworkContact(HandleRefModel):
+@grainy_model(
+    namespace="poc_set",
+    namespace_instance="{namespace}.{instance.visible}",
+    parent="network",
+)
 @reversion.register
-class NetworkContact(pdb_models.ContactBase):
+class NetworkContact(ProtectedMixin, pdb_models.ContactBase):
     """
-    Describes a contact point (phone, email etc.) for a network
+    Describes a contact point (phone, email etc.) for a network.
     """
 
     # id = models.AutoField(primary_key=True)
@@ -3905,59 +4335,60 @@ class NetworkContact(pdb_models.ContactBase):
         Network, on_delete=models.CASCADE, default=0, related_name="poc_set"
     )
 
+    TECH_ROLES = ["Technical", "NOC", "Policy"]
+
     class Meta:
         db_table = "peeringdb_network_contact"
 
-    @classmethod
-    def nsp_namespace_in_list(cls, **kwargs):
-        """
-        This is used to build a relative namespace for this model if it is contained
-        within a list. The preceding namespace part will be provided by the container
-        element.
-
-        So in this case we just want to return the value of the visible attribute
-        """
-        if "obj" in kwargs:
-            return "%s" % kwargs.get("obj")
-        return kwargs.get("visible")
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, net_id, vis):
-        """
-        Returns permissioning namespace for a network contact
-        """
-        return "{}.poc_set.{}".format(
-            Network.nsp_namespace_from_id(org_id, net_id), vis
-        )
+    @property
+    def is_tech_contact(self):
+        return self.role in self.TECH_ROLES
 
     @property
-    def nsp_namespace(self):
+    def deletable(self):
         """
-        Returns a custom namespace for an instance of this model
-        """
-        return self.__class__.nsp_namespace_from_id(
-            self.network.org_id, self.network.id, self.visible
-        )
+        Returns whether or not the poc is currently
+        in a state where it can be marked as deleted.
 
-    @property
-    def nsp_require_explicit_read(self):
+        This will be False for pocs that are the last remaining
+        technical contact point for a network that has
+        active netixlans. (#923)
         """
-        Make sure non-public instances of this models are always requiring
-        explicit permissions to view
-        """
-        return self.visible != "Public"
 
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["net"])
+        # non-technical pocs can always be deleted
+
+        if not self.is_tech_contact:
+            self._not_deletable_reason = None
+            return True
+
+        netixlan_count = self.network.netixlan_set_active.count()
+        tech_poc_count = self.network.poc_set_active.filter(
+            role__in=self.TECH_ROLES
+        ).count()
+
+        if netixlan_count and tech_poc_count == 1:
+
+            # there are active netixlans and this poc is the
+            # only technical poc left
+
+            self._not_deletable_reason = _(
+                "Last technical contact point for network with active peers"
+            )
+            return False
+        else:
+            self._not_deletable_reason = None
+            return True
 
     def clean(self):
         self.phone = validate_phonenumber(self.phone)
+        self.visible = validate_poc_visible(self.visible)
 
 
+@grainy_model(namespace="netfac", parent="network")
 @reversion.register
 class NetworkFacility(pdb_models.NetworkFacilityBase):
     """
-    Describes a network <-> facility relationship
+    Describes a network <-> facility relationship.
     """
 
     network = models.ForeignKey(
@@ -3972,28 +4403,12 @@ class NetworkFacility(pdb_models.NetworkFacilityBase):
         unique_together = ("network", "facility", "local_asn")
 
     @classmethod
-    def nsp_namespace_from_id(cls, org_id, net_id, fac_id):
-        """
-        Returns permissioning namespace for a netfac
-        """
-        return "{}.fac.{}".format(Network.nsp_namespace_from_id(org_id, net_id), fac_id)
-
-    @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this netfac
-        """
-        return self.__class__.nsp_namespace_from_id(
-            self.network.org_id, self.network_id, self.facility_id
-        )
-
-    @classmethod
     def related_to_name(cls, value=None, filt=None, field="facility__name", qset=None):
         """
         Filter queryset of netfac objects related to facilities with name match
-        in facility__name according to filter
+        in facility__name according to filter.
 
-        Relationship through facility
+        Relationship through facility.
         """
         if not qset:
             qset = cls.handleref.undeleted()
@@ -4005,9 +4420,9 @@ class NetworkFacility(pdb_models.NetworkFacilityBase):
     ):
         """
         Filter queryset of netfac objects related to country via match
-        in facility__country according to filter
+        in facility__country according to filter.
 
-        Relationship through facility
+        Relationship through facility.
         """
         if not qset:
             qset = cls.handleref.filter(status="ok")
@@ -4017,9 +4432,9 @@ class NetworkFacility(pdb_models.NetworkFacilityBase):
     def related_to_city(cls, value=None, filt=None, field="facility__city", qset=None):
         """
         Filter queryset of netfac objects related to city via match
-        in facility__city according to filter
+        in facility__city according to filter.
 
-        Relationship through facility
+        Relationship through facility.
         """
         if not qset:
             qset = cls.handleref.undeleted()
@@ -4028,14 +4443,11 @@ class NetworkFacility(pdb_models.NetworkFacilityBase):
     @property
     def descriptive_name(self):
         """
-        Returns a descriptive label of the netfac for logging purposes
+        Returns a descriptive label of the netfac for logging purposes.
         """
         return "netfac{} AS{} {} <-> {}".format(
             self.id, self.network.asn, self.network.name, self.facility.name
         )
-
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["net"])
 
     def clean(self):
 
@@ -4061,23 +4473,23 @@ class NetworkFacility(pdb_models.NetworkFacilityBase):
         self.local_asn = self.network.asn
 
 
-# validate:
-# ip in prefix
-# prefix on lan
-# FIXME - need unique constraint at save time, allow empty string for ipv4/ipv6
 def format_speed(value):
     if value >= 1000000:
-        return "%dT" % (value / 10 ** 6)
+        value = value / 10 ** 6
+        if not value % 1:
+            return f"{value:.0f}T"
+        return f"{value:.1f}T"
     elif value >= 1000:
-        return "%dG" % (value / 10 ** 3)
+        return f"{value / 10 ** 3:.0f}G"
     else:
-        return "%dM" % value
+        return f"{value:.0f}M"
 
 
+@grainy_model(namespace="ixlan", parent="network")
 @reversion.register
 class NetworkIXLan(pdb_models.NetworkIXLanBase):
     """
-    Describes a network relationship to an IX through an IX Lan
+    Describes a network relationship to an IX through an IX Lan.
     """
 
     network = models.ForeignKey(
@@ -4101,7 +4513,7 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
     @property
     def descriptive_name(self):
         """
-        Returns a descriptive label of the netixlan for logging purposes
+        Returns a descriptive label of the netixlan for logging purposes.
         """
         return "netixlan{} AS{} {} {}".format(
             self.id, self.asn, self.ipaddr4, self.ipaddr6
@@ -4110,14 +4522,14 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
     @property
     def ix_name(self):
         """
-        Returns the exchange name for this netixlan
+        Returns the exchange name for this netixlan.
         """
         return self.ixlan.ix.name
 
     @property
     def ix_id(self):
         """
-        Returns the exchange id for this netixlan
+        Returns the exchange id for this netixlan.
         """
         return self.ixlan.ix_id
 
@@ -4126,12 +4538,10 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
 
         """
         Returns a tuple that identifies the netixlan
-        in the context of an ix-f member data entry
-
-        as a unqiue record by asn, ip4 and ip6 address
+        in the context of an ix-f member data entry as a unqiue record by asn, ip4 and ip6 address.
         """
 
-        net = self.network
+        self.network
         return (self.asn, self.ipaddr4, self.ipaddr6)
 
     @property
@@ -4141,32 +4551,6 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
         ipaddr6 = ipaddr6 or _("IPv6 not set")
 
         return f"AS{asn} - {ipaddr4} - {ipaddr6}"
-
-    # FIXME
-    # permission namespacing
-    # right now it is assumed that the network owns the netixlan
-    # this needs to be discussed further
-
-    @classmethod
-    def nsp_namespace_from_id(cls, org_id, net_id, ixlan_id):
-        """
-        Returns permissioning namespace for a netixlan
-        """
-        return "{}.ixlan.{}".format(
-            Network.nsp_namespace_from_id(org_id, net_id), ixlan_id
-        )
-
-    @property
-    def nsp_namespace(self):
-        """
-        Returns permissioning namespace for this netixlan
-        """
-        return self.__class__.nsp_namespace_from_id(
-            self.network.org_id, self.network.id, self.ixlan_id
-        )
-
-    def nsp_has_perms_PUT(self, user, request):
-        return validate_PUT_ownership(user, self, request.data, ["net"])
 
     @classmethod
     def related_to_ix(cls, value=None, filt=None, field="ix_id", qset=None):
@@ -4189,7 +4573,7 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
     def related_to_name(cls, value=None, filt=None, field="ix__name", qset=None):
         """
         Filter queryset of netixlan objects related to exchange via a name match
-        according to filter
+        according to filter.
 
         Relationship through ixlan -> ix
         """
@@ -4198,7 +4582,7 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
     def ipaddress_conflict(self):
         """
         Checks whether the ip addresses specified on this netixlan
-        exist on another netixlan (with status="ok")
+        exist on another netixlan (with status="ok").
 
         Returns:
             - tuple(bool, bool): tuple of two booleans, first boolean is
@@ -4228,6 +4612,11 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
     def validate_speed(self):
         if self.speed in [None, 0]:
             pass
+
+        # bypass validation according to #741
+        elif bypass_validation():
+            return
+
         elif self.speed > settings.DATA_QUALITY_MAX_SPEED:
             raise ValidationError(
                 _("Maximum speed: {}").format(
@@ -4243,7 +4632,7 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
 
     def clean(self):
         """
-        Custom model validation
+        Custom model validation.
         """
         errors = {}
 
@@ -4302,7 +4691,7 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
 
     def ipaddr(self, version):
         """
-        Return the netixlan's ipaddr for ip version
+        Return the netixlan's ipaddr for ip version.
         """
         if version == 4:
             return self.ipaddr4
@@ -4312,15 +4701,15 @@ class NetworkIXLan(pdb_models.NetworkIXLanBase):
 
     def descriptive_name_ipv(self, version):
         """
-        Returns a descriptive label of the netixlan for logging purposes
-        Will only contain the ipaddress matching the specified version
+        Returns a descriptive label of the netixlan for logging purposes.
+        Will only contain the ipaddress matching the specified version.
         """
-        return "netixlan{} AS{} {}".format(self.id, self.asn, self.ipaddr(version))
+        return f"netixlan{self.id} AS{self.asn} {self.ipaddr(version)}"
 
 
 class User(AbstractBaseUser, PermissionsMixin):
     """
-    proper length fields user
+    Proper length fields user.
     """
 
     username = models.CharField(
@@ -4372,7 +4761,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     def pending_affiliation_requests(self):
         """
         Returns the currently pending user -> org affiliation
-        requests for this user
+        requests for this user.
         """
         return self.affiliation_requests.filter(status="pending").order_by("-created")
 
@@ -4380,7 +4769,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     def affiliation_requests_available(self):
         """
         Returns whether the user currently has any affiliation request
-        slots available, by checking that the number of pending affiliation requests
+        slots available by checking that the number of pending affiliation requests
         the user has is lower than MAX_USER_AFFILIATION_REQUESTS
         """
         return (
@@ -4391,7 +4780,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def organizations(self):
         """
-        Returns all organizations this user is a member of
+        Returns all organizations this user is a member of.
         """
         ids = []
         for group in self.groups.all():
@@ -4404,7 +4793,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def networks(self):
         """
-        Returns all networks this user is a member of
+        Returns all networks this user is a member of.
         """
         return list(
             chain.from_iterable(org.net_set_active.all() for org in self.organizations)
@@ -4422,7 +4811,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     def email_confirmed(self):
         """
         Returns True if the email specified by the user has
-        been confirmed, False if not
+        been confirmed, False if not.
         """
 
         try:
@@ -4435,11 +4824,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def is_verified_user(self):
         """
-        Returns whether the user is verified (eg has been validated
-        by pdb staff)
+        Returns whether the user is verified (e.g., has been validated
+        by PDB staff).
 
-        right now this is accomplished by checking if the user
-        has been added to the 'user' user group
+        Currently this is accomplished by checking if the user
+        has been added to the 'user' user group.
         """
 
         group = Group.objects.get(id=settings.USER_GROUP_ID)
@@ -4449,25 +4838,50 @@ class User(AbstractBaseUser, PermissionsMixin):
     def autocomplete_search_fields():
         """
         Used by grappelli autocomplete to determine what
-        fields to search in
+        fields to search in.
         """
         return ("username__icontains", "email__icontains", "last_name__icontains")
 
     def related_label(self):
         """
-        Used by grappelli autocomplete for representation
+        Used by grappelli autocomplete for representation.
         """
         return f"{self.username} <{self.email}> ({self.id})"
 
     def flush_affiliation_requests(self):
         """
         Removes all user -> org affiliation requests for this user
-        that have been denied or canceled
+        that have been denied or canceled.
         """
 
         UserOrgAffiliationRequest.objects.filter(
             user=self, status__in=["denied", "canceled"]
         ).delete()
+
+    def recheck_affiliation_requests(self):
+        """
+        Will reevaluate pending affiliation requests to unclaimed
+        ASN orgs.
+
+        This allows a user with such a pending affiliation request to
+        change ther email and recheck against rdap data for automatic
+        ownership approval. (#375)
+        """
+
+        for req in self.pending_affiliation_requests.filter(asn__gt=0):
+
+            # we dont want to re-evaluate for affiliation requests
+            # with organizations that already have admin users managing them
+            if req.org_id and req.org.admin_usergroup.user_set.exists():
+                continue
+
+            # cancel current request
+            req.delete()
+
+            # reopen request
+            UserOrgAffiliationRequest.objects.create(
+                user=self, org=req.org, asn=req.asn, status="pending"
+            )
 
     def get_locale(self):
         "Returns user preferred language."
@@ -4510,8 +4924,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def set_unverified(self):
         """
-        Remove user from 'user' group
-        Add user to 'guest' group
+        Remove user from 'user' group.
+        Add user to 'guest' group.
         """
         guest_group = Group.objects.get(id=settings.GUEST_GROUP_ID)
         user_group = Group.objects.get(id=settings.USER_GROUP_ID)
@@ -4525,8 +4939,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def set_verified(self):
         """
-        Add user to 'user' group
-        Remove user from 'guest' group
+        Add user to 'user' group.
+        Remove user from 'guest' group.
         """
         guest_group = Group.objects.get(id=settings.GUEST_GROUP_ID)
         user_group = Group.objects.get(id=settings.USER_GROUP_ID)
@@ -4580,7 +4994,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def password_reset_initiate(self):
         """
-        Initiate the password reset process for the user
+        Initiate the password reset process for the user.
         """
 
         # pylint: disable=access-member-before-definition
@@ -4633,11 +5047,37 @@ class User(AbstractBaseUser, PermissionsMixin):
             except IndexError, inst:
                 pass
         """
+
         # Exact email matching
         for email in rdap.emails:
             if email.lower() == self.email.lower():
                 return True
         return False
+
+
+class UserAPIKey(AbstractAPIKey):
+    """
+    An API Key managed by a user. Can be readonly or can take on the
+    permissions of the User.
+    """
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="api_keys",
+    )
+
+    readonly = models.BooleanField(
+        default=False,
+        help_text=_(
+            "Determines if API Key inherits the User Permissions or is readonly."
+        ),
+    )
+
+    class Meta(AbstractAPIKey.Meta):
+        verbose_name = "User API key"
+        verbose_name_plural = "User API keys"
+        db_table = "peeringdb_user_api_key"
 
 
 def password_reset_token():
@@ -4673,8 +5113,8 @@ class IXFImportEmail(models.Model):
     )
 
     class Meta:
-        verbose_name = _("IXF Import Email")
-        verbose_name_plural = _("IXF Import Emails")
+        verbose_name = _("IX-F Import Email")
+        verbose_name_plural = _("IX-F Import Emails")
 
 
 class UserPasswordReset(models.Model):
@@ -4700,7 +5140,7 @@ class UserPasswordReset(models.Model):
 class CommandLineTool(models.Model):
     """
     Describes command line tool execution by a staff user inside the
-    control panel (admin)
+    control panel (admin).
     """
 
     tool = models.CharField(
@@ -4753,7 +5193,7 @@ class EnvironmentSetting(models.Model):
 
     """
     Environment settings overrides controlled through
-    django admin (/cp)
+    django admin (/cp).
     """
 
     class Meta:
@@ -4808,10 +5248,10 @@ class EnvironmentSetting(models.Model):
 
         """
         Get the current value of the setting specified by
-        it's setting name
+        its setting name.
 
         If no instance has been saved for the specified setting
-        the default value will be returned
+        the default value will be returned.
         """
         try:
             instance = cls.objects.get(setting=setting)
@@ -4822,13 +5262,13 @@ class EnvironmentSetting(models.Model):
     @property
     def value(self):
         """
-        Get the value for this setting
+        Get the value for this setting.
         """
         return getattr(self, self.setting_to_field[self.setting])
 
     def set_value(self, value):
         """
-        Update the value for this setting
+        Update the value for this setting.
         """
         setattr(self, self.setting_to_field[self.setting], value)
         self.full_clean()
@@ -4862,5 +5302,3 @@ if not getattr(settings, "DISABLE_VERIFICATION_QUEUE", False):
     if not getattr(settings, "DISABLE_VERIFICATION_QUEUE_EMAILS", False):
         # send admin notification emails for these models
         QUEUE_NOTIFY = (InternetExchange, Network, Facility, Organization)
-
-autodiscover_namespaces(Network, Facility, InternetExchange)

@@ -1,84 +1,93 @@
-import datetime
-import time
-import json
-import ipaddress
-import re
-from . import forms
+"""
+django-admin interface definitions
 
-from operator import or_
+This is the interface used by peeringdb admin-com that is currently
+exposed at the path `/cp`.
+
+New admin views wrapping HandleRef models need to extend the
+`SoftDeleteAdmin` class.
+
+Admin views wrapping verification-queue enabled models need to also
+add the `ModelAdminWithVQCtrl` Mixin.
+
+Version history is implemented through django-handleref.
+"""
+
+import datetime
+import ipaddress
+import json
+import re
 
 import django.urls
+import reversion
+from django import forms as baseForms
+from django.conf import settings
 from django.conf.urls import url
-from django.shortcuts import redirect, Http404
-from django.contrib.contenttypes.models import ContentType
 from django.contrib import admin, messages
-from django.contrib.auth import forms
 from django.contrib.admin import helpers
 from django.contrib.admin.actions import delete_selected
-from django.contrib.admin.views.main import ChangeList
-from django.db.utils import OperationalError
-from django.http import HttpResponseForbidden
-from django import forms as baseForms
-from django.utils import html
+from django.contrib.auth.admin import UserAdmin
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.conf import settings
+from django.db.models import Q
+from django.db.utils import OperationalError
+from django.forms import DecimalField
+from django.shortcuts import redirect
 from django.template import loader
 from django.template.response import TemplateResponse
-from django.db.models import Q
-from django.db.models.functions import Concat
-from django.db.utils import OperationalError
-from django_namespace_perms.admin import (
-    UserPermissionInline,
-    UserPermissionInlineAdd,
-    UserAdmin,
-)
+from django.utils import html
 from django.utils.safestring import mark_safe
-
-import reversion
+from django.utils.translation import ugettext_lazy as _
+from django_grainy.admin import UserPermissionInlineAdmin
+from django_handleref.admin import VersionAdmin as HandleRefVersionAdmin
+from rest_framework_api_key.admin import APIKeyModelAdmin
+from rest_framework_api_key.models import APIKey
 from reversion.admin import VersionAdmin
 
-from django_handleref.admin import VersionAdmin as HandleRefVersionAdmin
-
 import peeringdb_server.admin_commandline_tools as acltools
-from peeringdb_server.views import JsonResponse, HttpResponseForbidden
+from peeringdb_server.inet import RdapException, RdapLookup, rdap_pretty_error_message
+from peeringdb_server.mail import mail_users_entity_merge
 from peeringdb_server.models import (
-    REFTAG_MAP,
-    QUEUE_ENABLED,
     COMMANDLINE_TOOLS,
-    OrganizationMerge,
-    OrganizationMergeEntity,
-    Sponsorship,
-    SponsorshipOrganization,
-    Partnership,
-    UserOrgAffiliationRequest,
-    VerificationQueueItem,
-    Organization,
+    QUEUE_ENABLED,
+    REFTAG_MAP,
+    UTC,
+    CommandLineTool,
+    DeskProTicket,
+    DeskProTicketCC,
     Facility,
+    GeoCoordinateCache,
     InternetExchange,
-    Network,
     InternetExchangeFacility,
+    IXFImportEmail,
+    IXFMemberData,
     IXLan,
     IXLanIXFMemberImportLog,
     IXLanIXFMemberImportLogEntry,
     IXLanPrefix,
-    IXFMemberData,
+    Network,
     NetworkContact,
     NetworkFacility,
     NetworkIXLan,
-    User,
-    CommandLineTool,
-    UTC,
-    DeskProTicket,
-    IXFImportEmail,
-    EnvironmentSetting,
+    Organization,
+    OrganizationAPIKey,
+    OrganizationMerge,
+    OrganizationMergeEntity,
+    Partnership,
     ProtectedAction,
+    Sponsorship,
+    SponsorshipOrganization,
+    User,
+    UserAPIKey,
+    UserOrgAffiliationRequest,
+    VerificationQueueItem,
 )
-from peeringdb_server.mail import mail_users_entity_merge
-from peeringdb_server.inet import RdapLookup, RdapException
+from peeringdb_server.util import coerce_ipaddr, round_decimal
+from peeringdb_server.views import HttpResponseForbidden, JsonResponse
+
+from . import forms
 
 delete_selected.short_description = "HARD DELETE - Proceed with caution"
-
-from django.utils.translation import ugettext_lazy as _
 
 # these app labels control permissions for the views
 # currently exposed in admin
@@ -95,8 +104,8 @@ PERMISSION_APP_LABELS = [
 
 class StatusFilter(admin.SimpleListFilter):
     """
-    A listing filter that by default will only show entities
-    with status="ok"
+    A listing filter that, by default, will only show entities
+    with status="ok".
     """
 
     title = _("Status")
@@ -131,8 +140,8 @@ class StatusFilter(admin.SimpleListFilter):
 def fk_handleref_filter(form, field, tag=None):
     """
     This filters foreign key dropdowns that hold handleref objects
-    to only contain undeleted objects and the object the instance is currently
-    set to
+    so they only contain undeleted objects and the object the instance is currently
+    set to.
     """
 
     if tag is None:
@@ -159,7 +168,7 @@ def fk_handleref_filter(form, field, tag=None):
 def merge_organizations(targets, target, request):
     """
     Merge organizations specified in targets into organization specified
-    in target
+    in target.
 
     Arguments:
 
@@ -277,8 +286,8 @@ class ModelAdminWithUrlActions(admin.ModelAdmin):
 
     def actions_view(self, request, object_id, action, **kwargs):
         """
-        this view allows us to call any actions we define in this model admin
-        to be called via an admin view placed at <model_name>/<id>/<action>/<action_name>
+        Allows one to call any actions defined in this model admin
+        to be called via an admin view placed at <model_name>/<id>/<action>/<action_name>.
         """
         if not request.user.is_superuser:
             return HttpResponseForbidden(request)
@@ -298,7 +307,7 @@ class ModelAdminWithUrlActions(admin.ModelAdmin):
 
     def get_urls(self):
         """
-        add the actions view as a subview of this model's admin views
+        Adds the actions view as a subview of this model's admin views.
         """
         info = self.model._meta.app_label, self.model._meta.model_name
 
@@ -348,7 +357,130 @@ def soft_delete(modeladmin, request, queryset):
 soft_delete.short_description = _("SOFT DELETE")
 
 
-class SanitizedAdmin:
+class CustomResultLengthFilter(admin.SimpleListFilter):
+
+    """
+    Filter object that enables custom result length
+    in django-admin change lists.
+
+    This should only be used in a model admin that extends
+    CustomResultLengthAdmin.
+    """
+
+    title = _("Resul length")
+    parameter_name = "sz"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("10", _("Show {} rows").format(10)),
+            ("25", _("Show {} rows").format(25)),
+            ("50", _("Show {} rows").format(50)),
+            ("100", _("Show {} rows").format(100)),
+            ("250", _("Show {} rows").format(250)),
+            ("all", _("Show {} rows").format("all")),
+        )
+
+    def queryset(self, request, queryset):
+        # we simply give back the queryset, since result
+        # length is controlled by the changelist instance
+        # and not the queryset
+        return queryset
+
+    def choices(self, changelist):
+        value = self.value()
+        if value is None:
+            value = f"{changelist.list_per_page}"
+
+        for lookup, title in self.lookup_choices:
+            yield {
+                "selected": value == str(lookup),
+                "query_string": changelist.get_query_string(
+                    {self.parameter_name: lookup}
+                ),
+                "display": title,
+            }
+
+
+class CustomResultLengthAdmin:
+    def get_list_filter(self, request):
+        list_filter = super().get_list_filter(request)
+        return list_filter + (CustomResultLengthFilter,)
+
+    def get_changelist(self, request, **kwargs):
+
+        # handle the customizable result length filter
+        # in the django-admin change list listings (#587)
+        #
+        # this is accomplished through the `sz` url parameter
+        if "sz" in request.GET:
+
+            try:
+                sz = request.GET.get("sz")
+                # all currently translates to a max of 100k entries
+                # this is a conservative limit that should be fine for
+                # the time being (possible performance concerns going
+                # bigger than that)
+                if sz == "all":
+                    sz = request.list_max_show_all = 100000
+                else:
+                    sz = int(sz)
+            except TypeError:
+                # value could not be converted to integer
+                # fall back to default
+                sz = self.list_per_page
+        else:
+            sz = self.list_per_page
+
+        request.list_per_page = sz
+
+        return super().get_changelist(request, **kwargs)
+
+    def get_changelist_instance(self, request):
+        """
+        Returns a `ChangeList` instance based on `request`. May raise
+        `IncorrectLookupParameters`.
+
+        This is copied from the original function in the dango source
+        for 2.2
+
+        This is overriden it here so one can set the list_per_page and list_max_show_all
+        values on the ChangeList accordingly.
+        """
+        list_display = self.get_list_display(request)
+        list_display_links = self.get_list_display_links(request, list_display)
+        # Add the action checkboxes if any actions are available.
+        if self.get_actions(request):
+            list_display = ["action_checkbox", *list_display]
+        sortable_by = self.get_sortable_by(request)
+        ChangeList = self.get_changelist(request)
+
+        list_per_page = getattr(request, "list_per_page", self.list_per_page)
+        list_max_show_all = getattr(
+            request, "list_max_show_all", self.list_max_show_all
+        )
+
+        cl = ChangeList(
+            request,
+            self.model,
+            list_display,
+            list_display_links,
+            self.get_list_filter(request),
+            self.date_hierarchy,
+            self.get_search_fields(request),
+            self.get_list_select_related(request),
+            list_per_page,
+            list_max_show_all,
+            self.list_editable,
+            self,
+            sortable_by,
+        )
+
+        cl.allow_custom_result_length = True
+
+        return cl
+
+
+class SanitizedAdmin(CustomResultLengthAdmin):
     def get_readonly_fields(self, request, obj=None):
         return ("version",) + tuple(super().get_readonly_fields(request, obj=obj))
 
@@ -357,7 +489,7 @@ class SoftDeleteAdmin(
     SanitizedAdmin, HandleRefVersionAdmin, VersionAdmin, admin.ModelAdmin
 ):
     """
-    Soft delete admin
+    Soft delete admin.
     """
 
     actions = [soft_delete]
@@ -375,18 +507,21 @@ class SoftDeleteAdmin(
             reversion.set_user(request.user)
         super().save_formset(request, form, formset, change)
 
+    def grainy_namespace(self, obj):
+        return obj.grainy_namespace
+
 
 class ModelAdminWithVQCtrl:
     """
     Extend from this model admin if you want to add verification queue
-    approve | deny controls to the top of its form
+    approve | deny controls to the top of its form.
     """
 
     def get_fieldsets(self, request, obj=None):
         """
-        we override get_fieldsets so we can attach the vq controls
-        to the top of the existing fieldset - whethers it's manually or automatically
-        defined
+        Overrides get_fieldsets so one can attach the vq controls
+        to the top of the existing fieldset - whether it's manually or automatically
+        defined.
         """
 
         fieldsets = tuple(super().get_fieldsets(request, obj=obj))
@@ -406,8 +541,8 @@ class ModelAdminWithVQCtrl:
 
     def get_readonly_fields(self, request, obj=None):
         """
-        make the modeladmin aware that "verification_queue" is a valid
-        readonly field
+        Makes the modeladmin aware that "verification_queue" is a valid
+        readonly field.
         """
         return ("verification_queue",) + tuple(
             super().get_readonly_fields(request, obj=obj)
@@ -415,7 +550,7 @@ class ModelAdminWithVQCtrl:
 
     def verification_queue(self, obj):
         """
-        This renders the controls or a status message
+        Renders the controls or a status message.
         """
 
         if getattr(settings, "DISABLE_VERIFICATION_QUEUE", False):
@@ -459,10 +594,10 @@ class IXLanInline(SanitizedAdmin, admin.StackedInline):
     model = IXLan
     extra = 0
     form = StatusForm
-    exclude = ["arp_sponge"]
+    exclude = ["arp_sponge", "dot1q_support"]
     readonly_fields = ["ixf_import_attempt_info", "prefixes"]
 
-    def has_add_permission(self, request):
+    def has_add_permission(self, request, obj=None):
         return False
 
     def has_delete_permission(self, request, obj):
@@ -482,14 +617,15 @@ class IXLanInline(SanitizedAdmin, admin.StackedInline):
 class InternetExchangeFacilityInline(SanitizedAdmin, admin.TabularInline):
     model = InternetExchangeFacility
     extra = 0
-    raw_id_fields = ("ix", "facility")
     form = StatusForm
+    raw_id_fields = ("ix", "facility")
 
-    autocomplete_lookup_fields = {
-        "fk": [
-            "facility",
-        ],
-    }
+    def __init__(self, parent_model, admin_site):
+        super().__init__(parent_model, admin_site)
+        if parent_model == Facility:
+            self.autocomplete_lookup_fields = {"fk": ["ix"]}
+        elif parent_model == InternetExchange:
+            self.autocomplete_lookup_fields = {"fk": ["facility"]}
 
 
 class NetworkContactInline(SanitizedAdmin, admin.TabularInline):
@@ -501,17 +637,16 @@ class NetworkContactInline(SanitizedAdmin, admin.TabularInline):
 class NetworkFacilityInline(SanitizedAdmin, admin.TabularInline):
     model = NetworkFacility
     extra = 0
-    raw_id_fields = (
-        "facility",
-        "network",
-    )
     form = StatusForm
-    raw_id_fields = ("facility",)
-    autocomplete_lookup_fields = {
-        "fk": [
-            "facility",
-        ],
-    }
+    raw_id_fields = ("network", "facility")
+    exclude = ("local_asn",)
+
+    def __init__(self, parent_model, admin_site):
+        super().__init__(parent_model, admin_site)
+        if parent_model == Facility:
+            self.autocomplete_lookup_fields = {"fk": ["network"]}
+        elif parent_model == Network:
+            self.autocomplete_lookup_fields = {"fk": ["facility"]}
 
 
 class NetworkIXLanForm(StatusForm):
@@ -541,9 +676,9 @@ class UserOrgAffiliationRequestInlineForm(baseForms.ModelForm):
         try:
             asn = self.cleaned_data.get("asn")
             if asn:
-                rdap_valid = RdapLookup().get_asn(asn).emails
+                RdapLookup().get_asn(asn).emails
         except RdapException as exc:
-            raise ValidationError({"asn": str(exc)})
+            raise ValidationError({"asn": rdap_pretty_error_message(exc)})
 
 
 class UserOrgAffiliationRequestInline(admin.TabularInline):
@@ -566,6 +701,7 @@ class InternetExchangeAdminForm(StatusForm):
 class InternetExchangeAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
     list_display = (
         "name",
+        "aka",
         "name_long",
         "city",
         "country",
@@ -578,13 +714,22 @@ class InternetExchangeAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
     search_fields = ("name",)
     readonly_fields = (
         "id",
-        "nsp_namespace",
+        "grainy_namespace",
         "ixf_import_history",
         "ixf_last_import",
         "ixf_net_count",
+        "proto_unicast_readonly",
+        "proto_ipv6_readonly",
+        "proto_multicast_readonly",
     )
     inlines = (InternetExchangeFacilityInline, IXLanInline)
     form = InternetExchangeAdminForm
+
+    exclude = (
+        "proto_unicast",
+        "proto_ipv6",
+        "proto_multicast",
+    )
 
     raw_id_fields = ("org",)
     autocomplete_lookup_fields = {
@@ -598,9 +743,22 @@ class InternetExchangeAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
                     "admin:peeringdb_server_ixlanixfmemberimportlog_changelist"
                 ),
                 obj.id,
-                _("IXF Import History"),
+                _("IX-F Import History"),
             )
         )
+
+    def proto_unicast_readonly(self, obj):
+        return obj.derived_proto_unicast
+
+    def proto_ipv6_readonly(self, obj):
+        return obj.derived_proto_ipv6
+
+    def proto_multicast_readonly(self, obj):
+        return obj.proto_multicast
+
+    proto_unicast_readonly.short_description = _("Unicast IPv4")
+    proto_ipv6_readonly.short_description = _("Unicast IPv6")
+    proto_multicast_readonly.short_description = _("Multicast")
 
 
 class IXLanAdminForm(StatusForm):
@@ -613,6 +771,7 @@ class IXLanAdmin(SoftDeleteAdmin):
     actions = []
     list_display = ("ix", "name", "descr", "status")
     search_fields = ("name", "ix__name")
+    exclude = ("dot1q_support",)
     list_filter = (StatusFilter,)
     readonly_fields = ("id",)
     inlines = (IXLanPrefixInline, NetworkInternetExchangeInline)
@@ -734,7 +893,7 @@ class IXLanIXFMemberImportLogEntryInline(admin.TabularInline):
         return mark_safe(f'<div style="background-color:{color}">{text}</div>')
 
 
-class IXLanIXFMemberImportLogAdmin(admin.ModelAdmin):
+class IXLanIXFMemberImportLogAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     search_fields = ("ixlan__ix__id",)
     list_display = ("id", "ix", "ixlan_name", "source", "created", "changes")
     readonly_fields = ("ix", "ixlan_name", "source", "changes")
@@ -783,7 +942,7 @@ class SponsorshipOrganizationInline(admin.TabularInline):
     }
 
 
-class SponsorshipAdmin(admin.ModelAdmin):
+class SponsorshipAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     list_display = ("organizations", "start_date", "end_date", "level", "status")
     readonly_fields = ("organizations", "status", "notify_date")
     inlines = (SponsorshipOrganizationInline,)
@@ -822,7 +981,7 @@ class PartnershipAdminForm(baseForms.ModelForm):
         fk_handleref_filter(self, "org")
 
 
-class PartnershipAdmin(admin.ModelAdmin):
+class PartnershipAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     list_display = ("org_name", "level", "status")
     readonly_fields = ("status", "org_name")
     form = PartnershipAdminForm
@@ -845,32 +1004,49 @@ class PartnershipAdmin(admin.ModelAdmin):
         return _("Active")
 
 
+class RoundingDecimalFormField(DecimalField):
+    def to_python(self, value):
+        value = super().to_python(value)
+        return round_decimal(value, self.decimal_places)
+
+
+class OrganizationAdminForm(StatusForm):
+    latitude = RoundingDecimalFormField(max_digits=9, decimal_places=6, required=False)
+    longitude = RoundingDecimalFormField(max_digits=9, decimal_places=6, required=False)
+
+
 class OrganizationAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
     list_display = ("handle", "name", "status", "created", "updated")
     ordering = ("-created",)
     search_fields = ("name",)
     list_filter = (StatusFilter,)
-    readonly_fields = ("id", "nsp_namespace")
-    form = StatusForm
+    readonly_fields = ("id", "grainy_namespace")
+    form = OrganizationAdminForm
 
     fields = [
         "status",
         "name",
+        "aka",
+        "name_long",
         "address1",
         "address2",
         "city",
         "state",
         "zipcode",
         "country",
+        "floor",
+        "suite",
         "latitude",
         "longitude",
+        "geocode_status",
+        "geocode_date",
         "website",
         "notes",
         "logo",
         "verification_queue",
         "version",
         "id",
-        "nsp_namespace",
+        "grainy_namespace",
     ]
 
     def get_urls(self):
@@ -963,6 +1139,9 @@ class OrganizationMergeLog(ModelAdminWithUrlActions):
 
 
 class FacilityAdminForm(StatusForm):
+    latitude = RoundingDecimalFormField(max_digits=9, decimal_places=6, required=False)
+    longitude = RoundingDecimalFormField(max_digits=9, decimal_places=6, required=False)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         fk_handleref_filter(self, "org")
@@ -973,7 +1152,7 @@ class FacilityAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
     ordering = ("-created",)
     list_filter = (StatusFilter,)
     search_fields = ("name",)
-    readonly_fields = ("id", "nsp_namespace")
+    readonly_fields = ("id", "grainy_namespace")
 
     raw_id_fields = ("org",)
     autocomplete_lookup_fields = {
@@ -989,12 +1168,17 @@ class FacilityAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
     fields = [
         "status",
         "name",
+        "aka",
+        "name_long",
         "address1",
         "address2",
         "city",
         "state",
         "zipcode",
         "country",
+        "region_continent",
+        "floor",
+        "suite",
         "latitude",
         "longitude",
         "website",
@@ -1005,15 +1189,20 @@ class FacilityAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
         "tech_phone",
         "sales_email",
         "sales_phone",
+        "property",
+        "diverse_serving_substations",
+        # django-admin doesnt seem to support multichoicefield automatically
+        # admins can edit this through the user-facing UX for now
+        # TODO: revisit enabling this field in django admin if AC communicates the need
+        # "available_voltage_services",
         "notes",
         "geocode_status",
         "geocode_date",
-        "geocode_error",
         "org",
         "verification_queue",
         "version",
         "id",
-        "nsp_namespace",
+        "grainy_namespace",
     ]
 
 
@@ -1031,11 +1220,11 @@ class NetworkAdminForm(StatusForm):
 
 
 class NetworkAdmin(ModelAdminWithVQCtrl, SoftDeleteAdmin):
-    list_display = ("name", "asn", "aka", "status", "created", "updated")
+    list_display = ("name", "asn", "aka", "name_long", "status", "created", "updated")
     ordering = ("-created",)
     list_filter = (StatusFilter,)
     search_fields = ("name", "asn")
-    readonly_fields = ("id", "nsp_namespace")
+    readonly_fields = ("id", "grainy_namespace")
     form = NetworkAdminForm
 
     inlines = (
@@ -1117,6 +1306,15 @@ class NetworkIXLanAdmin(SoftDeleteAdmin):
 
     def net(self, obj):
         return f"{obj.network.name} (AS{obj.network.asn})"
+
+    def get_search_results(self, request, queryset, search_term):
+        # Issue 913
+        # If the search_term is for an ipaddress6, this will compress it
+        search_term = coerce_ipaddr(search_term)
+        queryset, use_distinct = super().get_search_results(
+            request, queryset, search_term
+        )
+        return queryset, use_distinct
 
 
 class NetworkContactAdmin(SoftDeleteAdmin):
@@ -1299,6 +1497,12 @@ class UserOrgAffiliationRequestAdmin(ModelAdminWithUrlActions):
 
 
 class UserCreationForm(forms.UserCreationForm):
+
+    # user creation through django-admin doesnt need
+    # captcha checking
+
+    require_captcha = False
+
     def clean_username(self):
         username = self.cleaned_data["username"]
         try:
@@ -1349,17 +1553,15 @@ class UserAdmin(ModelAdminWithVQCtrl, UserAdmin):
 
     for name, grp in fieldsets:
         grp["fields"] = tuple(
-            [
-                fld
-                for fld in grp["fields"]
-                if fld
-                not in [
-                    "groups",
-                    "user_permissions",
-                    "is_staff",
-                    "is_active",
-                    "is_superuser",
-                ]
+            fld
+            for fld in grp["fields"]
+            if fld
+            not in [
+                "groups",
+                "user_permissions",
+                "is_staff",
+                "is_active",
+                "is_superuser",
             ]
         )
         if name == "Permissions":
@@ -1368,8 +1570,8 @@ class UserAdmin(ModelAdminWithVQCtrl, UserAdmin):
     def version(self, obj):
         """
         Users are not versioned, but ModelAdminWithVQCtrl defines
-        a readonly field called "version", for sake of completion
-        return a 0 version here
+        a readonly field called "version." For the sake of completion,
+        return a 0 version here.
         """
         return 0
 
@@ -1421,8 +1623,7 @@ class UserPermissionAdmin(UserAdmin):
 
     inlines = (
         UserOrgAffiliationRequestInline,
-        UserPermissionInline,
-        UserPermissionInlineAdd,
+        UserPermissionInlineAdmin,
     )
 
     fieldsets = (
@@ -1435,7 +1636,6 @@ class UserPermissionAdmin(UserAdmin):
                     "is_staff",
                     "is_superuser",
                     "groups",
-                    "user_permissions",
                 ),
                 "classes": ("wide",),
             },
@@ -1469,15 +1669,15 @@ class UserPermissionAdmin(UserAdmin):
 class CommandLineToolPrepareForm(baseForms.Form):
     """
     Form that allows user to select which commandline tool
-    to run
+    to run.
     """
 
     tool = baseForms.ChoiceField(choices=COMMANDLINE_TOOLS)
 
 
-class CommandLineToolAdmin(admin.ModelAdmin):
+class CommandLineToolAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     """
-    View that lets staff users run peeringdb command line tools
+    View that lets staff users run peeringdb command line tools.
     """
 
     list_display = ("tool", "description", "user", "created", "status")
@@ -1559,7 +1759,7 @@ class CommandLineToolAdmin(admin.ModelAdmin):
 
     def preview_command_view(self, request):
         """
-        This view has the user preview the result of running the command
+        This view has the user preview the result of running the command.
         """
         if not self.has_add_permission(request):
             return HttpResponseForbidden()
@@ -1632,7 +1832,7 @@ class CommandLineToolAdmin(admin.ModelAdmin):
         )
 
 
-class IXFImportEmailAdmin(admin.ModelAdmin):
+class IXFImportEmailAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     list_display = (
         "subject",
         "recipients",
@@ -1678,14 +1878,20 @@ class IXFImportEmailAdmin(admin.ModelAdmin):
 
             # Add (case insensitive) regex search results to standard search results
             try:
-                queryset = self.model.objects.filter(subject__iregex=search_term)
+                queryset = self.model.objects.filter(
+                    subject__iregex=search_term
+                ).order_by("-created")
             except OperationalError:
                 return queryset, use_distinct
 
         return queryset, use_distinct
 
 
-class DeskProTicketAdmin(admin.ModelAdmin):
+class DeskProTicketCCInline(admin.TabularInline):
+    model = DeskProTicketCC
+
+
+class DeskProTicketAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     list_display = (
         "id",
         "subject",
@@ -1695,9 +1901,21 @@ class DeskProTicketAdmin(admin.ModelAdmin):
         "deskpro_ref",
         "deskpro_id",
     )
-    readonly_fields = ("user",)
     search_fields = ("subject",)
     change_list_template = "admin/change_list_with_regex_search.html"
+    inlines = (DeskProTicketCCInline,)
+    raw_id_fields = ("user",)
+
+    autocomplete_lookup_fields = {
+        "fk": [
+            "user",
+        ],
+    }
+
+    def get_readonly_fields(self, request, obj=None):
+        if not obj:
+            return self.readonly_fields
+        return self.readonly_fields + ("user",)
 
     def get_search_results(self, request, queryset, search_term):
         queryset, use_distinct = super().get_search_results(
@@ -1720,7 +1938,9 @@ class DeskProTicketAdmin(admin.ModelAdmin):
 
             # Add (case insensitive) regex search results to standard search results
             try:
-                queryset = self.model.objects.filter(subject__iregex=search_term)
+                queryset = self.model.objects.filter(
+                    subject__iregex=search_term
+                ).order_by("-created")
             except OperationalError:
                 return queryset, use_distinct
 
@@ -1744,7 +1964,7 @@ def apply_ixf_member_data(modeladmin, request, queryset):
 apply_ixf_member_data.short_description = _("Apply")
 
 
-class IXFMemberDataAdmin(admin.ModelAdmin):
+class IXFMemberDataAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     change_form_template = "admin/ixf_member_data_change_form.html"
 
     list_display = (
@@ -1830,14 +2050,6 @@ class IXFMemberDataAdmin(admin.ModelAdmin):
 
         return qset.filter(requirement_of__isnull=True)
 
-        ids = [
-            row.id
-            for row in qset.exclude(requirement_of__isnull=False)
-            if row.action != "noop"
-        ]
-
-        return qset.filter(id__in=ids)
-
     def ix(self, obj):
         return obj.ixlan.ix
 
@@ -1873,7 +2085,7 @@ class IXFMemberDataAdmin(admin.ModelAdmin):
             return self.readonly_fields + ("asn", "ipaddr4", "ipaddr6")
         return self.readonly_fields
 
-    def has_add_permission(self, request):
+    def has_add_permission(self, request, obj=None):
         return False
 
     def has_delete_permission(self, request, obj=None):
@@ -1898,7 +2110,7 @@ class EnvironmentSettingForm(baseForms.ModelForm):
         fields = ["setting", "value"]
 
 
-class EnvironmentSettingAdmin(admin.ModelAdmin):
+class EnvironmentSettingAdmin(CustomResultLengthAdmin, admin.ModelAdmin):
     list_display = ["setting", "value", "created", "updated", "user"]
 
     fields = ["setting", "value"]
@@ -1913,6 +2125,30 @@ class EnvironmentSettingAdmin(admin.ModelAdmin):
         return obj.set_value(form.cleaned_data["value"])
 
 
+class OrganizationAPIKeyAdmin(APIKeyModelAdmin):
+    list_display = ["org", "prefix", "name", "created", "revoked"]
+    search_fields = ("prefix", "org__name")
+
+
+class UserAPIKeyAdmin(APIKeyModelAdmin):
+    list_display = ["user", "prefix", "name", "readonly", "created", "revoked"]
+    search_fields = ("prefix", "user__username", "user__email")
+
+
+class GeoCoordinateAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "country",
+        "city",
+        "state",
+        "zipcode",
+        "address1",
+        "longitude",
+        "latitude",
+        "fetched",
+    ]
+
+
 # Commented out via issue #860
 # admin.site.register(EnvironmentSetting, EnvironmentSettingAdmin)
 admin.site.register(IXFMemberData, IXFMemberDataAdmin)
@@ -1925,6 +2161,7 @@ admin.site.register(NetworkIXLan, NetworkIXLanAdmin)
 admin.site.register(NetworkContact, NetworkContactAdmin)
 admin.site.register(NetworkFacility, NetworkFacilityAdmin)
 admin.site.register(Network, NetworkAdmin)
+admin.site.unregister(User)
 admin.site.register(User, UserAdmin)
 admin.site.register(VerificationQueueItem, VerificationQueueAdmin)
 admin.site.register(Sponsorship, SponsorshipAdmin)
@@ -1936,3 +2173,7 @@ admin.site.register(CommandLineTool, CommandLineToolAdmin)
 admin.site.register(UserOrgAffiliationRequest, UserOrgAffiliationRequestAdmin)
 admin.site.register(DeskProTicket, DeskProTicketAdmin)
 admin.site.register(IXFImportEmail, IXFImportEmailAdmin)
+admin.site.unregister(APIKey)
+admin.site.register(OrganizationAPIKey, OrganizationAPIKeyAdmin)
+admin.site.register(UserAPIKey, UserAPIKeyAdmin)
+admin.site.register(GeoCoordinateCache, GeoCoordinateAdmin)

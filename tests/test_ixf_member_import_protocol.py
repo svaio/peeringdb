@@ -1,34 +1,34 @@
+import datetime
+import io
+import ipaddress
 import json
 import os
-from pprint import pprint
-import pytest
-import reversion
-import requests
-import jsonschema
 import time
-import io
-import datetime
-import ipaddress
+from pprint import pprint
 
-from django.test import override_settings
+import jsonschema
+import pytest
+import requests
+import reversion
 from django.conf import settings
+from django.test import override_settings
 
-from peeringdb_server.models import (
-    Organization,
-    Network,
-    NetworkIXLan,
-    NetworkContact,
-    IXLan,
-    IXLanPrefix,
-    InternetExchange,
-    IXFMemberData,
-    IXLanIXFMemberImportLog,
-    User,
-    DeskProTicket,
-    IXFImportEmail,
-)
 from peeringdb_server import ixf
 from peeringdb_server.deskpro import FailingMockAPIClient
+from peeringdb_server.models import (
+    DeskProTicket,
+    InternetExchange,
+    IXFImportEmail,
+    IXFMemberData,
+    IXLan,
+    IXLanIXFMemberImportLog,
+    IXLanPrefix,
+    Network,
+    NetworkContact,
+    NetworkIXLan,
+    Organization,
+    User,
+)
 
 from .util import setup_test_data
 
@@ -77,6 +77,9 @@ def test_add_deleted_netixlan(entities, use_ip, save):
 
     importer.update(ixlan, data=data)
     importer.notify_proposals()
+
+    for email in IXFImportEmail.objects.all():
+        print(email.message)
 
     assert_no_emails(network, ixlan.ix)
 
@@ -137,6 +140,8 @@ def test_resolve_local_ixf(entities, use_ip, save):
     # We do not email upon resolve
     assert_no_emails(network, ixlan.ix)
 
+    importer.update(ixlan, data=data)
+    importer.notify_proposals()
     # Test idempotent
     assert_idempotent(importer, ixlan, data)
 
@@ -221,6 +226,10 @@ def test_update_data_attributes(entities, use_ip, save):
 
     # Assert no emails
     assert_no_emails(network, ixlan.ix)
+
+    # test revision user
+    version = reversion.models.Version.objects.get_for_object(netixlan)
+    assert version.first().revision.user == importer.ticket_user
 
     # test rollback
     import_log = IXLanIXFMemberImportLog.objects.first()
@@ -1376,8 +1385,12 @@ def test_single_ipaddr_matches_no_auto_update(entities, use_ip, save):
         assert len(importer.log["data"]) == 1
         assert importer.log["data"][0]["action"] == "suggest-modify"
 
-        ixf_member_del = IXFMemberData.objects.filter(requirement_of__isnull=False).first()
-        ixf_member_add = IXFMemberData.objects.filter(requirement_of__isnull=True).first()
+        ixf_member_del = IXFMemberData.objects.filter(
+            requirement_of__isnull=False
+        ).first()
+        ixf_member_add = IXFMemberData.objects.filter(
+            requirement_of__isnull=True
+        ).first()
 
         assert ixf_member_del.requirement_of == ixf_member_add
         assert ixf_member_add.action == "modify"
@@ -2150,6 +2163,41 @@ def test_mark_invalid_remote_no_auto_update(entities, save):
     assert_idempotent(importer, ixlan, data)
 
 
+# The following test no longer would cause an error because of
+# issue 882.
+
+# @pytest.mark.django_db
+# def test_remote_cannot_be_parsed(entities, save):
+#     """
+#     Remote cannot be parsed. We create a ticket, email the IX, and create a lock.
+#     """
+#     data = setup_test_data("ixf.member.unparsable")
+#     ixlan = entities["ixlan"][0]
+#     start = datetime.datetime.now(datetime.timezone.utc)
+#     importer = ixf.Importer()
+#     importer.sanitize(data)
+
+#     if not save:
+#         return assert_idempotent(importer, ixlan, data, save=False)
+
+#     importer.update(ixlan, data=data)
+#     importer.notify_proposals()
+
+#     ERROR_MESSAGE = "No entries in any of the vlan_list lists, aborting"
+#     assert importer.ixlan.ixf_ixp_import_error_notified > start  # This sets the lock
+#     assert ERROR_MESSAGE in importer.ixlan.ixf_ixp_import_error
+#     assert (
+#         ERROR_MESSAGE in IXFImportEmail.objects.filter(ix=ixlan.ix.id).first().message
+#     )
+
+#     # Assert idempotent / lock
+#     importer.sanitize(data)
+#     importer.update(ixlan, data=data)
+
+#     assert ERROR_MESSAGE in importer.ixlan.ixf_ixp_import_error
+#     assert IXFImportEmail.objects.filter(ix=ixlan.ix.id).count() == 1
+
+
 @pytest.mark.django_db
 def test_mark_invalid_multiple_vlans(entities, save):
     """
@@ -2186,6 +2234,10 @@ def test_mark_invalid_multiple_vlans(entities, save):
     importer.update(ixlan, data=data)
 
     assert ERROR_MESSAGE in importer.ixlan.ixf_ixp_import_error
+
+    for email in IXFImportEmail.objects.filter(ix=ixlan.ix.id):
+        print(email.message)
+
     assert IXFImportEmail.objects.filter(ix=ixlan.ix.id).count() == 1
 
     # Test idempotent
@@ -2193,13 +2245,13 @@ def test_mark_invalid_multiple_vlans(entities, save):
 
 
 @pytest.mark.django_db
-def test_remote_cannot_be_parsed(entities, save):
+def test_vlan_list_empty(entities, save):
     """
-    Remote cannot be parsed. We create a ticket, email the IX, and create a lock.
+    VLAN list is empty. Per issue 882, this shouldn't raise any errors.
     """
-    data = setup_test_data("ixf.member.unparsable")
+    data = setup_test_data("ixf.member.vlan_list_empty")
     ixlan = entities["ixlan"][0]
-    start = datetime.datetime.now(datetime.timezone.utc)
+
     importer = ixf.Importer()
     importer.sanitize(data)
 
@@ -2209,19 +2261,17 @@ def test_remote_cannot_be_parsed(entities, save):
     importer.update(ixlan, data=data)
     importer.notify_proposals()
 
-    ERROR_MESSAGE = "No entries in any of the vlan_list lists, aborting"
-    assert importer.ixlan.ixf_ixp_import_error_notified > start  # This sets the lock
-    assert ERROR_MESSAGE in importer.ixlan.ixf_ixp_import_error
-    assert (
-        ERROR_MESSAGE in IXFImportEmail.objects.filter(ix=ixlan.ix.id).first().message
-    )
+    assert importer.ixlan.ixf_ixp_import_error_notified is None
+    assert importer.ixlan.ixf_ixp_import_error is None
+    assert_no_emails(ix=ixlan.ix)
 
     # Assert idempotent / lock
     importer.sanitize(data)
     importer.update(ixlan, data=data)
 
-    assert ERROR_MESSAGE in importer.ixlan.ixf_ixp_import_error
-    assert IXFImportEmail.objects.filter(ix=ixlan.ix.id).count() == 1
+    assert importer.ixlan.ixf_ixp_import_error_notified is None
+    assert importer.ixlan.ixf_ixp_import_error is None
+    assert_no_emails(ix=ixlan.ix)
 
 
 def test_validate_json_schema():
@@ -2320,17 +2370,18 @@ def test_create_deskpro_tickets_after_x_days(entities):
 
 @pytest.mark.django_db
 def test_create_deskpro_tickets_no_contacts(entities):
-    data = setup_test_data("ixf.member.2")
+    """
+    For issue 883, we want to test that two consolidated emails
+    are sent if we have two networks missing contacts.
+    """
+    data = setup_test_data("ixf.member.6")
     network = entities["net"]["UPDATE_DISABLED"]
+    network2 = entities["net"]["UPDATE_DISABLED_2"]
     ixlan = entities["ixlan"][0]
-    ix = ixlan.ix
 
     # Delete contacts
     for netcontact in entities["netcontact"]:
         netcontact.delete()
-
-    ix.tech_email = ""
-    ix.save()
 
     entities["netixlan"].append(
         NetworkIXLan.objects.create(
@@ -2358,15 +2409,31 @@ def test_create_deskpro_tickets_no_contacts(entities):
             operational=True,
         )
     )
+    entities["netixlan"].append(
+        NetworkIXLan.objects.create(
+            network=network2,
+            ixlan=ixlan,
+            asn=network2.asn,
+            speed=10000,
+            ipaddr4="195.69.147.239",
+            ipaddr6="2001:7f8:1::a500:2100:1",
+            status="ok",
+            is_rs_peer=True,
+            operational=True,
+        )
+    )
+
     importer = ixf.Importer()
     importer.update(ixlan, data=data)
     importer.notify_proposals()
 
-    # Assert Tickets are created immediately
-    if network.ipv6_support:
-        assert DeskProTicket.objects.count() == 4
-    else:
-        assert DeskProTicket.objects.count() == 3
+    # Issue 883: Assert a single consolidated ticket is created
+    assert DeskProTicket.objects.count() == 2
+    for ticket in DeskProTicket.objects.all():
+        assert ticket.cc_set.count() == 0
+
+    assert DeskProTicket.objects.filter(subject__contains=str(network.asn)).exists()
+    assert DeskProTicket.objects.filter(subject__contains=str(network2.asn)).exists()
 
 
 @pytest.mark.django_db
@@ -2374,7 +2441,6 @@ def test_email_with_partial_contacts(entities):
     data = setup_test_data("ixf.member.2")
     network = entities["net"]["UPDATE_DISABLED"]
     ixlan = entities["ixlan"][0]
-    ix = ixlan.ix
 
     # Delete network contact but keep ix contact
     for netcontact in entities["netcontact"]:
@@ -2410,13 +2476,10 @@ def test_email_with_partial_contacts(entities):
     importer.update(ixlan, data=data)
     importer.notify_proposals()
 
-    # Assert Tickets are created immediately
-    if network.ipv6_support:
-        assert IXFImportEmail.objects.count() == 5
-        assert DeskProTicket.objects.count() == 4
-    else:
-        assert IXFImportEmail.objects.count() == 4
-        assert DeskProTicket.objects.count() == 3
+    # Issue 883: Assert a single consolidated ticket is created
+    assert DeskProTicket.objects.count() == 1
+    for ticket in DeskProTicket.objects.all():
+        assert ticket.cc_set.count() == 0
 
 
 @pytest.mark.django_db
@@ -2431,7 +2494,6 @@ def test_no_email_if_deskpro_fails(entities, use_ip, save):
     data = setup_test_data("ixf.member.2")
     network = entities["net"]["UPDATE_DISABLED"]
     ixlan = entities["ixlan"][0]
-    ix = ixlan.ix
 
     # Delete network contacts
     for netcontact in entities["netcontact"]:
@@ -2473,11 +2535,10 @@ def test_no_email_if_deskpro_fails(entities, use_ip, save):
     importer.update(ixlan, data=data)
     importer.notify_proposals()
 
-    # Assert Tickets are created immediately
-    if network.ipv6_support:
-        assert DeskProTicket.objects.count() == 4
-    else:
-        assert DeskProTicket.objects.count() == 3
+    # Issue 883: Assert a single consolidated ticket is created
+    assert DeskProTicket.objects.count() == 1
+    for ticket in DeskProTicket.objects.all():
+        assert ticket.cc_set.count() == 0
 
     # This is the single consolidated email
     assert IXFImportEmail.objects.count() == 1
@@ -2511,6 +2572,7 @@ def test_resolve_deskpro_ticket(entities):
     importer.notify_proposals()
 
     # Per issue #860 we no longer create tickets for conflict resolution
+    # just based on age
     assert DeskProTicket.objects.count() == 0
 
     # Commented out bc of issue #860
@@ -2725,6 +2787,107 @@ def test_send_email(entities, use_ip):
     # This should actually send an email
     importer.notify_proposals()
     assert importer.emails == 2
+
+
+@pytest.mark.django_db
+def test_ixlan_add_netixlan_no_redundant_save_on_null_ip(entities):
+
+    """
+    Tests that if ixlan.add_netixlan receives a netixlan which
+    has either ipaddr4 or ipaddr6 nulled will not cause redundant
+    saves to already deleted netixlans that also have that same field
+    nulled (#1019)
+    """
+
+    network = entities["net"]["UPDATE_ENABLED"]
+    ixlan = entities["ixlan"][0]
+
+    # create deleted netixlans
+
+    with reversion.create_revision():
+        NetworkIXLan.objects.create(
+            ixlan=ixlan,
+            network=network,
+            asn=network.asn + 1,
+            ipaddr4="195.69.147.253",
+            ipaddr6="2001:7f8:1::a500:2906:10",
+            speed=1000,
+            status="deleted",
+        )
+
+        NetworkIXLan.objects.create(
+            ixlan=ixlan,
+            network=network,
+            asn=network.asn + 1,
+            ipaddr4="195.69.147.252",
+            ipaddr6="2001:7f8:1::a500:2906:11",
+            speed=1000,
+            status="deleted",
+        )
+
+        netixlan6 = NetworkIXLan.objects.create(
+            ixlan=ixlan,
+            network=network,
+            asn=network.asn + 1,
+            ipaddr4=None,
+            ipaddr6="2001:7f8:1::a500:2906:9",
+            speed=1000,
+            status="deleted",
+        )
+
+        netixlan4 = NetworkIXLan.objects.create(
+            ixlan=ixlan,
+            network=network,
+            asn=network.asn + 1,
+            ipaddr4="195.69.147.251",
+            ipaddr6=None,
+            speed=1000,
+            status="deleted",
+        )
+
+    netixlan4.refresh_from_db()
+    netixlan6.refresh_from_db()
+
+    assert netixlan4.version == 1
+    assert netixlan6.version == 1
+
+    # create netixlans
+
+    netixlan6_new = NetworkIXLan(
+        ixlan=ixlan,
+        network=network,
+        asn=network.asn,
+        ipaddr4=None,
+        ipaddr6="2001:7f8:1::a500:2906:10",
+        speed=1000,
+        status="deleted",
+    )
+
+    netixlan4_new = NetworkIXLan(
+        ixlan=ixlan,
+        network=network,
+        asn=network.asn,
+        ipaddr4="195.69.147.252",
+        ipaddr6=None,
+        speed=1000,
+        status="deleted",
+    )
+
+    with reversion.create_revision():
+        netixlan6_new = ixlan.add_netixlan(netixlan6_new)
+        netixlan4_new = ixlan.add_netixlan(netixlan4_new)
+
+    netixlan4.refresh_from_db()
+    netixlan6.refresh_from_db()
+
+    # No further saves should have happened to the already
+    # deleted netixlans
+
+    assert not netixlan4.notes
+    assert not netixlan6.notes
+
+    assert netixlan4.version == 1
+    assert netixlan6.version == 1
 
 
 # FIXTURES

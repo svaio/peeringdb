@@ -1,27 +1,26 @@
-import json
+"""
+Define ix-f import preview, review and post-mortem views.
+"""
+
 import base64
+import json
 
-from django.http import JsonResponse, HttpResponse
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
 from django.contrib.auth import authenticate
-
-from django_namespace_perms.util import has_perms
-from ratelimit.decorators import ratelimit, is_ratelimited
+from django.http import HttpResponse, JsonResponse
+from django.utils.translation import ugettext_lazy as _
+from ratelimit.decorators import ratelimit
 
 from peeringdb_server import ixf
-from peeringdb_server.models import (
-    IXLan,
-    Network,
-    NetworkIXLan,
-)
+from peeringdb_server.models import IXLan, Network
+from peeringdb_server.util import check_permissions
 
 RATELIMITS = settings.RATELIMITS
 
 
 def enable_basic_auth(fn):
     """
-    a simple decorator to enable basic auth for a specific view
+    A simple decorator to enable basic auth for a specific view.
     """
 
     def wrapped(request, *args, **kwargs):
@@ -71,7 +70,7 @@ def view_import_ixlan_ixf_preview(request, ixlan_id):
     except IXLan.DoesNotExist:
         return error_response(_("Ixlan not found"), status=404)
 
-    if not has_perms(request.user, ixlan, "update"):
+    if not check_permissions(request.user, ixlan, "u"):
         return error_response(_("Permission denied"), status=403)
 
     importer = ixf.Importer()
@@ -102,14 +101,14 @@ def view_import_net_ixf_postmortem(request, net_id):
     except Network.DoesNotExist:
         return error_response(_("Network not found"), status=404)
 
-    if not has_perms(request.user, net, "update"):
+    if not check_permissions(request.user, net, "u"):
         return error_response(_("Permission denied"), status=403)
 
     # make sure limit is within bounds and a valid number
 
     try:
         limit = int(request.GET.get("limit", 25))
-    except:
+    except Exception:
         limit = 25
 
     errors = []
@@ -149,7 +148,7 @@ def view_import_net_ixf_preview(request, net_id):
     except Network.DoesNotExist:
         return error_response(_("Network not found"), status=404)
 
-    if not has_perms(request.user, net, "update"):
+    if not check_permissions(request.user, net, "u"):
         return error_response(_("Permission denied"), status=403)
 
     total_log = {"data": [], "errors": []}
@@ -157,10 +156,10 @@ def view_import_net_ixf_preview(request, net_id):
     for ixlan in net.ixlan_set_ixf_enabled:
         importer = ixf.Importer()
         importer.cache_only = True
-        success = importer.update(ixlan, asn=net.asn, save=False)
+        importer.update(ixlan, asn=net.asn, save=False)
 
         # strip suggestions
-        log_data = [i for i in importer.log["data"] if not "suggest-" in i["action"]]
+        log_data = [i for i in importer.log["data"] if "suggest-" not in i["action"]]
 
         total_log["data"].extend(log_data)
         total_log["errors"].extend(

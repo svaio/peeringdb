@@ -1,20 +1,20 @@
-import os
 import json
+import os
+
 import pytest
-import peeringdb_server.models as models
-import peeringdb_server.views as pdbviews
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase, Client, RequestFactory
-from django.conf import settings
+from django.test import Client, RequestFactory, TestCase
 
 import peeringdb_server.inet as pdbinet
+import peeringdb_server.models as models
+import peeringdb_server.views as pdbviews
+
 from .util import SettingsCase, reset_group_ids
 
-ERR_COULD_NOT_GET_RIR_ENTRY = "RDAP Lookup Error: Test Not Found"
-ERR_BOGON_ASN = (
-    "RDAP Lookup Error: ASNs in this range are not allowed " "in this environment"
-)
+ERR_COULD_NOT_GET_RIR_ENTRY = "This ASN is not assigned by any RIR"
+ERR_BOGON_ASN = "ASNs in this range are private or reserved"
 
 RdapLookup_get_asn = pdbinet.RdapLookup.get_asn
 
@@ -173,20 +173,20 @@ class AsnAutomationTestCase(TestCase):
             subject=f"[{settings.RELEASE_ENV}] [ASNAUTO] Organization 'ORG AS9000001', Network 'AS9000001' created"
         )
         self.assertEqual(
-            ticket.body, self.ticket["asnauto-9000001-org-net-created.txt"].format(
-                org_id = org.id,
-                net_id = org.net_set.first().id
-            )
+            ticket.body,
+            self.ticket["asnauto-9000001-org-net-created.txt"].format(
+                org_id=org.id, net_id=org.net_set.first().id
+            ),
         )
 
         ticket = models.DeskProTicket.objects.get(
             subject=f"[{settings.RELEASE_ENV}] [ASNAUTO] Ownership claim granted to Org 'ORG AS9000001' for user 'user_a'"
         )
         self.assertEqual(
-            ticket.body, self.ticket["asnauto-9000001-user-granted-ownership.txt"].format(
-                org_id = org.id,
-                net_id = org.net_set.first().id
-            )
+            ticket.body,
+            self.ticket["asnauto-9000001-user-granted-ownership.txt"].format(
+                org_id=org.id, net_id=org.net_set.first().id
+            ),
         )
 
         net = models.Network.objects.get(asn=asn_ok)
@@ -211,10 +211,11 @@ class AsnAutomationTestCase(TestCase):
             subject=f"[{settings.RELEASE_ENV}] User user_b wishes to request ownership of ORG AS9000002"
         )
         self.assertEqual(
-            ticket.body, self.ticket["asnauto-9000002-user-requested-ownership.txt"].format(
-                user_id = self.user_b.id,
-                affil_id = self.user_b.affiliation_requests.last().id
-            )
+            ticket.body,
+            self.ticket["asnauto-9000002-user-requested-ownership.txt"].format(
+                user_id=self.user_b.id,
+                affil_id=self.user_b.affiliation_requests.last().id,
+            ),
         )
 
         net = models.Network.objects.get(asn=asn_ok_b)
@@ -226,6 +227,42 @@ class AsnAutomationTestCase(TestCase):
         self.assertEqual(net.status, "ok")
         self.assertEqual(net.org.status, "ok")
 
+    def test_reevaluate(self):
+        """
+        tests re-check of affiliation requests
+        """
+        asn_ok = 9000001
+
+        reset_group_ids()
+
+        # test 1: test affiliation to asn that has RiR entry and user relationship
+        # cannot be verified (ASN 9000002)
+        request = self.factory.post("/affiliate-to-org", data={"asn": asn_ok})
+        request.user = self.user_b
+        request._dont_enforce_csrf_checks = True
+        resp = json.loads(pdbviews.view_affiliate_to_org(request).content)
+        self.assertEqual(resp.get("status"), "ok")
+
+        net = models.Network.objects.get(asn=asn_ok)
+
+        assert not net.org.admin_usergroup.user_set.filter(id=self.user_b.id).exists()
+
+        # simulate email change
+        old_email = self.user_b.email
+        self.user_b.email = self.user_a.email
+        self.user_b.save()
+
+        self.user_b.recheck_affiliation_requests()
+
+        ticket = models.DeskProTicket.objects.get(
+            subject=f"[{settings.RELEASE_ENV}] [ASNAUTO] Ownership claim granted to Org 'ORG AS{asn_ok}' for user 'user_b'"
+        )
+
+        assert net.org.admin_usergroup.user_set.filter(id=self.user_b.id).exists()
+
+        self.user_b.email = old_email
+        self.user_b.save()
+
     def test_affiliate_limit(self):
         """
         test affiliation request limit (fail when there is n pending
@@ -234,13 +271,19 @@ class AsnAutomationTestCase(TestCase):
 
         for i in range(0, settings.MAX_USER_AFFILIATION_REQUESTS + 1):
 
+            # For this test we need the orgs to actually exist
+
+            models.Organization.objects.create(name=f"AFFILORG{i}", status="ok")
             request = self.factory.post(
                 "/affiliate-to-org", data={"org": f"AFFILORG{i}"}
             )
             request.user = self.user_b
             request._dont_enforce_csrf_checks = True
+            print("\n")
+            print(i)
             response = pdbviews.view_affiliate_to_org(request)
 
+            print(response.content)
             if i < settings.MAX_USER_AFFILIATION_REQUESTS:
                 assert response.status_code == 200
             else:
@@ -330,11 +373,13 @@ class AsnAutomationTestCase(TestCase):
 
         self.assertEqual(
             ticket.body,
-            self.ticket["asnauto-9000002-affiliated-user-requested-ownership.txt"].format(
+            self.ticket[
+                "asnauto-9000002-affiliated-user-requested-ownership.txt"
+            ].format(
                 admin_org_id=org_1.id,
                 user_org_id=org_2.id,
                 user_id=self.user_b.id,
-                affil_id=self.user_b.affiliation_requests.first().id
+                affil_id=self.user_b.affiliation_requests.first().id,
             ),
         )
 

@@ -1,13 +1,19 @@
+"""
+RDAP lookup and validation.
+
+Network validation.
+
+Prefix renumbering.
+"""
 import ipaddress
-import re
 
 import rdap
-from rdap import RdapAsn
-from rdap.exceptions import RdapException, RdapHTTPError, RdapNotFoundError
-import requests
 from django.utils.translation import ugettext_lazy as _
+from rdap.exceptions import RdapException, RdapNotFoundError
 
 from peeringdb_server import settings
+
+RdapAsn = rdap.RdapAsn  # noqa
 
 # Valid IRR Source values
 # reference: http://www.irr.net/docs/list.html
@@ -93,12 +99,16 @@ TUTORIAL_ASN_RANGES = [
 ]
 
 
+class RdapInvalidRange(RdapException):
+    pass
+
+
 class BogonAsn(rdap.RdapAsn):
 
     """
-    On tutorial mode environments we will return an instance
+    On tutorial mode environments, return an instance
     of this to provide an rdapasn result for asns in the
-    private and documentation ranges
+    private and documentation ranges.
     """
 
     def __init__(self, asn):
@@ -120,6 +130,9 @@ class RdapLookup(rdap.RdapClient):
         # create rdap config
         config = dict(
             bootstrap_url=settings.RDAP_URL.rstrip("/"),
+            self_bootstrap=settings.RDAP_SELF_BOOTSTRAP,
+            bootstrap_dir=settings.RDAP_BOOTSTRAP_DIR,
+            ignore_recurse_errors=settings.RDAP_IGNORE_RECURSE_ERRORS,
             lacnic_apikey=settings.RDAP_LACNIC_APIKEY,
             timeout=10,
         )
@@ -127,24 +140,38 @@ class RdapLookup(rdap.RdapClient):
 
     def get_asn(self, asn):
         """
-        We handle asns that fall into the private/documentation ranges
-        manually - others are processed normally through rdap lookup
+        Handle asns that fall into the private/documentation ranges
+        manually - others are processed normally through rdap lookup.
         """
 
         if asn_is_bogon(asn):
             if settings.TUTORIAL_MODE and asn_is_in_ranges(asn, TUTORIAL_ASN_RANGES):
                 return BogonAsn(asn)
             else:
-                raise RdapException(
-                    _("ASNs in this range " "are not allowed in this environment")
-                )
+                # Issue 995: Block registering private ASN ranges
+                # raise RdapInvalidRange if ASN is in private or reserved range
+                raise RdapInvalidRange()
         return super().get_asn(asn)
+
+
+def rdap_pretty_error_message(exc):
+    """
+    Take an RdapException instance and return a customer friendly
+    error message (str).
+    """
+
+    if isinstance(exc, RdapNotFoundError):
+        return _("This ASN is not assigned by any RIR")
+    if isinstance(exc, RdapInvalidRange):
+        return _("ASNs in this range are private or reserved")
+
+    return _("{}").format(exc)
 
 
 def asn_is_bogon(asn):
     """
     Test if an asn is bogon by being either in the documentation
-    or private asn ranges
+    or private asn ranges.
 
     Arguments:
         - asn<int>
@@ -157,7 +184,7 @@ def asn_is_bogon(asn):
 
 def asn_is_in_ranges(asn, ranges):
     """
-    Test if an asn falls within any of the ranges provided
+    Test if an asn falls within any of the ranges provided.
 
     Arguments:
         - asn<int>
@@ -175,7 +202,7 @@ def asn_is_in_ranges(asn, ranges):
 
 def network_is_bogon(network):
     """
-    Returns if the passed ipaddress network is a bogon
+    Return if the passed ipaddress network is a bogon.
 
     Arguments:
         - network <ipaddress.IPv4Network|ipaddress.IPv6Network>
@@ -190,7 +217,7 @@ def network_is_bogon(network):
 def network_is_pdb_valid(network):
     """
     Return if the passed ipaddress network is in pdb valid
-    address space
+    address space.
 
     Arguments:
         - network <ipaddress.IPv4Network|ipaddress.IPv6Network>
@@ -225,10 +252,10 @@ def network_is_pdb_valid(network):
 
 def get_prefix_protocol(prefix):
     """
-    Takes a network address space prefix string and returns
-    a string describing the protocol
+    Take a network address space prefix string and return
+    a string describing the protocol.
 
-    Will raise a ValueError if it cannot determine protocol
+    Will raise a ValueError if it cannot determine protocol.
 
     Returns:
         str: IPv4 or IPv6
@@ -248,7 +275,7 @@ def get_prefix_protocol(prefix):
 def renumber_ipaddress(ipaddr, old_prefix, new_prefix):
 
     """
-    Renumber an ipaddress from old prefix to new prefix
+    Renumber an ipaddress from old prefix to new prefix.
 
     Arguments:
         - ipaddr (ipaddress.ip_address)
@@ -307,9 +334,7 @@ def renumber_ipaddress(ipaddr, old_prefix, new_prefix):
 
     # return renumbered ipaddress
 
-    return ipaddress.ip_address(
-        "{}".format(delimiter.join([str(o) for o in ip_octets]))
-    )
+    return ipaddress.ip_address(f"{delimiter.join([str(o) for o in ip_octets])}")
 
 
 def get_client_ip(request):

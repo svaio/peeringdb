@@ -1,31 +1,31 @@
-import json
-from pprint import pprint
-import reversion
-import requests
-import jsonschema
-import time
-import io
 import datetime
+import io
+import json
+import time
+from pprint import pprint
 
+import jsonschema
+import pytest
+import requests
+import reversion
 from django.core.management import call_command
 from django.test import override_settings
 
-from peeringdb_server.models import (
-    Organization,
-    Network,
-    NetworkIXLan,
-    NetworkContact,
-    IXLan,
-    IXLanPrefix,
-    InternetExchange,
-    IXFMemberData,
-    IXLanIXFMemberImportLog,
-    User,
-    DeskProTicket,
-    IXFImportEmail,
-)
 from peeringdb_server import ixf
-import pytest
+from peeringdb_server.models import (
+    DeskProTicket,
+    InternetExchange,
+    IXFImportEmail,
+    IXFMemberData,
+    IXLan,
+    IXLanIXFMemberImportLog,
+    IXLanPrefix,
+    Network,
+    NetworkContact,
+    NetworkIXLan,
+    Organization,
+    User,
+)
 
 from .util import setup_test_data
 
@@ -42,6 +42,23 @@ def test_reset_hints(entities, data_cmd_ixf_hints):
 
     assert IXFMemberData.objects.count() == 0
     assert DeskProTicket.objects.filter(body__contains="reset_hints").count() == 1
+
+
+@pytest.mark.django_db
+def test_reset_process_requested(entities):
+    ixlan = entities["ixlan"]
+    ixlan.ixf_ixp_member_list_url = "localhost"
+    ixlan.ixf_ixp_import_enabled = True
+    ixlan.save()
+
+    ixlan.ix.request_ixf_import()
+
+    call_command("pdb_ixf_ixp_member_import", process_requested=0, commit=True)
+
+    ixlan.ix.refresh_from_db()
+
+    assert ixlan.ix.ixf_import_request_status == "finished"
+    assert ixlan.ix.ixf_import_request
 
 
 @pytest.mark.django_db
@@ -153,6 +170,8 @@ def test_runtime_errors(entities, capsys, mocker):
         side_effect=RuntimeError("Unexpected error"),
     )
 
+    out = io.StringIO()
+
     with pytest.raises(SystemExit) as pytest_wrapped_exit:
         call_command(
             "pdb_ixf_ixp_member_import",
@@ -160,14 +179,15 @@ def test_runtime_errors(entities, capsys, mocker):
             commit=True,
             ixlan=[ixlan.id],
             asn=asn,
+            stdout=out,
         )
 
     # Assert we are outputting the exception and traceback to the stderr
-    captured = capsys.readouterr()
-    assert "Unexpected error" in captured.err
-    assert str(ixlan.id) in captured.err
-    assert str(ixlan.ix.name) in captured.err
-    assert str(ixlan.ixf_ixp_member_list_url) in captured.err
+    captured = out.getvalue()
+    assert "Unexpected error" in captured
+    assert str(ixlan.id) in captured
+    assert str(ixlan.ix.name) in captured
+    assert str(ixlan.ixf_ixp_member_list_url) in captured
 
     # Assert we are exiting with status code 1
     assert pytest_wrapped_exit.value.code == 1

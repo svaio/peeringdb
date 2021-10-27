@@ -1,11 +1,12 @@
+"""
+Post stat breakdown for any given date.
+"""
 import datetime
 import json
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
-from django.contrib.contenttypes.models import ContentType
-import reversion
-from reversion.models import Version, Revision
+from reversion.models import Version
 
 from peeringdb_server.models import REFTAG_MAP, UTC
 
@@ -91,7 +92,7 @@ class Command(BaseCommand):
             self.stdout.write(date)
             self.stdout.write("-------------")
             for each in self.tags + ["users"]:
-                self.stdout.write("{}: {}".format(each, stats[each]))
+                self.stdout.write(f"{each}: {stats[each]}")
         elif output_format == "json":
             self.stdout.write(json.dumps({date: stats}))
         else:

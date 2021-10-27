@@ -1,79 +1,80 @@
-from django.conf.urls import include, url
-from django.views.generic import TemplateView, RedirectView
+"""
+Django url to view routing.
+"""
 from django.conf import settings
+from django.conf.urls import include, url
+from django.urls import path
+from django.views.generic import RedirectView, TemplateView
+from django.views.i18n import JavaScriptCatalog
 
+import peeringdb_server.api_key_views
+import peeringdb_server.data_views
+import peeringdb_server.org_admin_views
 import peeringdb_server.rest
-
-from peeringdb_server.models import InternetExchange, Network, Facility, Organization
-
 from peeringdb_server.autocomplete_views import (
-    FacilityAutocompleteForNetwork,
-    FacilityAutocompleteForExchange,
-    OrganizationAutocomplete,
+    DeletedVersionAutocomplete,
     ExchangeAutocomplete,
     ExchangeAutocompleteJSON,
-    IXLanAutocomplete,
     FacilityAutocomplete,
+    FacilityAutocompleteForExchange,
+    FacilityAutocompleteForNetwork,
     FacilityAutocompleteJSON,
-    DeletedVersionAutocomplete,
+    IXLanAutocomplete,
+    NetworkAutocomplete,
+    OrganizationAutocomplete,
     clt_history,
 )
-
 from peeringdb_server.export_views import (
+    AdvancedSearchExportView,
     view_export_ixf_ix_members,
     view_export_ixf_ixlan_members,
-    AdvancedSearchExportView,
 )
-
 from peeringdb_server.import_views import (
     view_import_ixlan_ixf_preview,
     view_import_net_ixf_postmortem,
     view_import_net_ixf_preview,
 )
-
-from django.views.i18n import JavaScriptCatalog
+from peeringdb_server.models import Facility, InternetExchange, Network, Organization
+from peeringdb_server.views import (
+    OrganizationLogoUpload,
+    cancel_affiliation_request,
+    network_dismiss_ixf_proposal,
+    network_reset_ixf_proposals,
+    request_api_search,
+    request_logout,
+    request_search,
+    request_translation,
+    resend_confirmation_mail,
+    view_about,
+    view_advanced_search,
+    view_affiliate_to_org,
+    view_aup,
+    view_exchange,
+    view_facility,
+    view_index,
+    view_maintenance,
+    view_network,
+    view_network_by_asn,
+    view_network_by_query,
+    view_organization,
+    view_password_change,
+    view_password_reset,
+    view_profile,
+    view_profile_v1,
+    view_registration,
+    view_request_ownership,
+    view_set_user_locale,
+    view_sponsorships,
+    view_suggest,
+    view_username_retrieve,
+    view_username_retrieve_complete,
+    view_username_retrieve_initiate,
+    view_verify,
+)
 
 # o
 # SITE
 
-from peeringdb_server.views import (
-    view_index,
-    view_registration,
-    view_password_reset,
-    view_password_change,
-    view_set_user_locale,
-    view_network,
-    view_network_by_asn,
-    view_network_by_query,
-    view_suggest,
-    view_exchange,
-    view_facility,
-    view_organization,
-    view_affiliate_to_org,
-    view_request_ownership,
-    view_verify,
-    view_profile,
-    view_profile_v1,
-    view_advanced_search,
-    view_sponsorships,
-    view_partnerships,
-    view_aup,
-    view_about,
-    view_username_retrieve,
-    view_username_retrieve_initiate,
-    view_username_retrieve_complete,
-    view_maintenance,
-    resend_confirmation_mail,
-    request_logout,
-    request_api_search,
-    request_search,
-    request_translation,
-    cancel_affiliation_request,
-    network_dismiss_ixf_proposal,
-    network_reset_ixf_proposals,
-)
-import peeringdb_server.org_admin_views
-import peeringdb_server.data_views
 
 urlpatterns = [
     url(r"^api_search$", request_api_search),
@@ -100,6 +101,11 @@ urlpatterns = [
     url(r"^aup$", view_aup),
     url(r"^about$", view_about),
     url(r"^affiliate-to-org$", view_affiliate_to_org),
+    path(
+        "org/<str:id>/upload-logo",
+        OrganizationLogoUpload.as_view(),
+        name="org-logo-upload",
+    ),
     url(
         r"^cancel-affiliation-request/(?P<uoar_id>\d+)/$",
         cancel_affiliation_request,
@@ -131,6 +137,8 @@ urlpatterns = [
     ),
     url(r"^%s$" % Network.handleref.tag, view_network_by_query),
     url(r"^asn/(?P<asn>\d+)/?$", view_network_by_asn, name="net-view-asn"),
+    url(r"^user_keys/add$", peeringdb_server.api_key_views.add_user_key),
+    url(r"^user_keys/revoke$", peeringdb_server.api_key_views.remove_user_key),
     url(r"^org_admin/users$", peeringdb_server.org_admin_views.users),
     url(
         r"^org_admin/user_permissions$",
@@ -155,6 +163,27 @@ urlpatterns = [
         r"^org_admin/manage_user/delete$",
         peeringdb_server.org_admin_views.manage_user_delete,
     ),
+    url(r"^org_admin/manage_key/add$", peeringdb_server.api_key_views.manage_key_add),
+    url(
+        r"^org_admin/manage_key/update$",
+        peeringdb_server.api_key_views.manage_key_update,
+    ),
+    url(
+        r"^org_admin/manage_key/revoke$",
+        peeringdb_server.api_key_views.manage_key_revoke,
+    ),
+    url(
+        r"^org_admin/key_permissions$",
+        peeringdb_server.api_key_views.key_permissions,
+    ),
+    url(
+        r"^org_admin/key_permissions/update$",
+        peeringdb_server.api_key_views.key_permission_update,
+    ),
+    url(
+        r"^org_admin/key_permissions/remove$",
+        peeringdb_server.api_key_views.key_permission_remove,
+    ),
     url(r"^data/countries$", peeringdb_server.data_views.countries),
     url(r"^data/sponsors$", peeringdb_server.data_views.sponsorships),
     url(r"^data/countries_b$", peeringdb_server.data_views.countries_w_blank),
@@ -162,6 +191,7 @@ urlpatterns = [
     url(r"^data/enum/(?P<name>[\w_]+)$", peeringdb_server.data_views.enum),
     url(r"^data/asns$", peeringdb_server.data_views.asns),
     url(r"^data/organizations$", peeringdb_server.data_views.organizations),
+    url(r"^data/my_organizations$", peeringdb_server.data_views.my_organizations),
     url(r"^data/locales$", peeringdb_server.data_views.languages),
     url(r"^export/ix/(?P<ix_id>\d+)/ixp-member-list$", view_export_ixf_ix_members),
     url(
@@ -237,6 +267,7 @@ urlpatterns += [
         name="autocomplete-fac-json",
     ),
     url(r"^autocomplete/fac$", FacilityAutocomplete.as_view(), name="autocomplete-fac"),
+    url(r"^autocomplete/net$", NetworkAutocomplete.as_view(), name="autocomplete-net"),
     url(
         r"^autocomplete/ixlan/$", IXLanAutocomplete.as_view(), name="autocomplete-ixlan"
     ),

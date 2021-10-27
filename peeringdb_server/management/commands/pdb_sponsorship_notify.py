@@ -1,6 +1,11 @@
-from django.core.management.base import BaseCommand
-from peeringdb_server.models import Sponsorship
+"""
+Look for expired sponsorships and sends a notification to sponsorship admin for recently expired sponsorships.
+"""
 import datetime
+
+from django.core.management.base import BaseCommand
+
+from peeringdb_server.models import Sponsorship
 
 
 class Command(BaseCommand):
@@ -17,6 +22,6 @@ class Command(BaseCommand):
                 sponsorship.notify_date is None
                 or sponsorship.notify_date < sponsorship.end_date
             ):
-                b = sponsorship.notify_expiration()
+                sponsorship.notify_expiration()
                 # if b:
                 #    self.log("Sent expiration notices for %s, expired on %s" % (sponsorship.org.name, sponsorship.end_date))

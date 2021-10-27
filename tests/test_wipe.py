@@ -1,6 +1,7 @@
-from django.core.management import call_command
-from django.contrib.auth import get_user_model
+import pytest
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.core.management import call_command
 
 from peeringdb_server.models import REFTAG_MAP, UTC
 
@@ -43,6 +44,8 @@ class TestWipe(ClientCase):
         assert get_user_model().objects.all().count() == 1
         assert get_user_model().objects.first().is_superuser == True
 
+    # FIXME: uncomment when test.peeringdb.com is back up
+    @pytest.mark.skip(reason="test.peeringdb.com is currently unavailable")
     def test_run_with_sync(self):
         """
         Test running `pdb_wipe` and sync data from

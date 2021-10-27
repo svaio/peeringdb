@@ -1,18 +1,23 @@
-import json
-import datetime
-import urllib.request, urllib.parse, urllib.error
-import csv
-import io
+"""
+Define export views used for IX-F export and advanced search file download.
+"""
+
 import collections
+import csv
+import datetime
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 
-from django.http import JsonResponse, HttpResponse
-from django.views import View
+from django.http import HttpResponse, JsonResponse
 from django.utils.translation import ugettext_lazy as _
-
+from django.views import View
 from rest_framework.test import APIRequestFactory
-from peeringdb_server.models import IXLan, NetworkIXLan, InternetExchange
-from peeringdb_server.rest import REFTAG_MAP as RestViewSets
+
+from peeringdb_server.models import IXLan
 from peeringdb_server.renderers import JSONEncoder
+from peeringdb_server.rest import REFTAG_MAP as RestViewSets
 
 
 def export_ixf_ix_members(ixlans, pretty=False):
@@ -108,7 +113,7 @@ def view_export_ixf_ixlan_members(request, ixlan_id):
 
 class ExportView(View):
     """
-    Base class for more complex data exports
+    Base class for more complex data exports.
     """
 
     # supported export fortmats
@@ -137,7 +142,7 @@ class ExportView(View):
             response_handler = getattr(self, f"response_{fmt}")
             response = response_handler(self.generate(request))
 
-            if self.download == True:
+            if self.download is True:
                 # send attachment header, triggering download on the client side
                 filename = self.download_name.format(extension=self.extensions.get(fmt))
                 response["Content-Disposition"] = 'attachment; filename="{}"'.format(
@@ -145,20 +150,22 @@ class ExportView(View):
                 )
             return response
 
-        except Exception as exc:
-            return JsonResponse({"non_field_errors": [str(exc)]}, status=400)
+        except Exception:
+            return JsonResponse(
+                {"non_field_errors": ["Internal Error (500)"]}, status=400
+            )
 
     def generate(self, request):
         """
-        Function that generates export data from request
+        Function that generates export data from request.
 
-        Override this
+        Override this.
         """
         return {}
 
     def response_json(self, data):
         """
-        Return Response object for normal json response
+        Return Response object for normal json response.
 
         Arguments:
             - data <list|dict>: serializable data, if list is passed you will need
@@ -173,7 +180,7 @@ class ExportView(View):
 
     def response_json_pretty(self, data):
         """
-        Returns Response object for pretty (indented) json response
+        Return Response object for pretty (indented) json response.
 
         Arguments:
             - data <list|dict>: serializable data, if list is passed tou will need
@@ -192,7 +199,7 @@ class ExportView(View):
 
     def response_csv(self, data):
         """
-        Returns Response object for CSV response
+        Return Response object for CSV response.
 
         Arguments:
             - data <list>
@@ -219,7 +226,7 @@ class ExportView(View):
 
 class AdvancedSearchExportView(ExportView):
     """
-    Allows exporting of advanced search result data
+    Allow exporting of advanced search result data.
     """
 
     tag = None
@@ -228,13 +235,13 @@ class AdvancedSearchExportView(ExportView):
 
     def fetch(self, request):
         """
-        Fetch data from api according to GET parameters
+        Fetch data from API according to GET parameters.
 
-        Note that `limit` and `depth` will be overwritten, other api
-        parameters will be passed along as-is
+        Note that `limit` and `depth` will be overwritten, other API
+        parameters will be passed along as-is.
 
         Returns:
-            - dict: un-rendered dataset returned by api
+            - dict: un-rendered dataset returned by API
         """
         params = request.GET.dict()
         params["limit"] = 250
@@ -245,7 +252,7 @@ class AdvancedSearchExportView(ExportView):
         viewset = RestViewSets[self.tag].as_view({"get": "list"})
 
         api_request = request_factory.get(
-            "/api/{}/?{}".format(self.tag, urllib.parse.urlencode(params))
+            f"/api/{self.tag}/?{urllib.parse.urlencode(params)}"
         )
 
         # we want to use the same user as the original request
@@ -256,9 +263,16 @@ class AdvancedSearchExportView(ExportView):
 
         return response.data
 
-    def get(self, request, tag, fmt):
+    def get(self, request, tag, fmt):  # lgtm[py/inheritance/signature-mismatch]
         """
-        Handle export
+        Handle export.
+
+        LGTM Notes: signature-mismatch: order of arguments are defined by the
+        url routing set up for this view. (e.g., /<tag>/<fmt>)
+
+        The `get` method will never be called in a different
+        context where a mismatching signature would matter so
+        the lgtm warning can be ignored in this case.
         """
         self.tag = tag
         return super().get(request, fmt)
@@ -267,7 +281,7 @@ class AdvancedSearchExportView(ExportView):
         """
         Generate data for the reftag specified in self.tag
 
-        This functions will call generate_<tag> and return the result
+        This function will call generate_<tag> and return the result.
 
         Arguments:
             - request <Request>
@@ -282,8 +296,8 @@ class AdvancedSearchExportView(ExportView):
 
     def generate_net(self, request):
         """
-        Fetch network data from the api according to request and then render
-        it ready for export
+        Fetch network data from the API according to request and then render
+        it ready for export.
 
         Arguments:
             - request <Request>
@@ -315,8 +329,8 @@ class AdvancedSearchExportView(ExportView):
 
     def generate_fac(self, request):
         """
-        Fetch facility data from the api according to request and then render
-        it ready for export
+        Fetch facility data from the API according to request and then render
+        it ready for export.
 
         Arguments:
             - request <Request>
@@ -347,8 +361,8 @@ class AdvancedSearchExportView(ExportView):
 
     def generate_ix(self, request):
         """
-        Fetch exchange data from the api according to request and then render
-        it ready for export
+        Fetch exchange data from the API according to request and then render
+        it ready for export.
 
         Arguments:
             - request <Request>
@@ -375,8 +389,8 @@ class AdvancedSearchExportView(ExportView):
 
     def generate_org(self, request):
         """
-        Fetch organization data from the api according to request and then render
-        it ready for export
+        Fetch organization data from the API according to request and then render
+        it ready for export.
 
         Arguments:
             - request <Request>

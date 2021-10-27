@@ -1,4 +1,3 @@
-from peeringdb_server.inet import RdapAsn
 import pytest
 import pytest_filedata
 

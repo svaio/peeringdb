@@ -1,9 +1,13 @@
-from django.core.management.base import BaseCommand, CommandError
+"""
+DEPRECATED
+"""
 import json
-import peeringdb_server.models as pdbm
+
 from django.contrib.contenttypes.models import ContentType
-from reversion.models import Version, Revision
-from optparse import make_option
+from django.core.management.base import BaseCommand
+from reversion.models import Version
+
+import peeringdb_server.models as pdbm
 
 MODELS = [
     pdbm.Organization,
@@ -19,9 +23,6 @@ MODELS = [
 
 
 class DBCommand(BaseCommand):
-    args = "<reftag> <id, id, ...>"
-    help = "Inspect an object's reversion history"
-
     def log(self, id, msg):
         print(f"{id}: {msg}")
 
@@ -29,8 +30,6 @@ class DBCommand(BaseCommand):
         print("".join(["-" for i in range(0, 80)]))
 
     def handle(self, *args, **options):
-
-        versions = Version.objects.all()
 
         args = list(args)
 
@@ -84,7 +83,7 @@ class DBCommand(BaseCommand):
                     continue
                 for k, v in list(data.items()):
                     if prev[k] != v:
-                        print("{}: '{}' => '{}'".format(k, prev[k], v))
+                        print(f"{k}: '{prev[k]}' => '{v}'")
 
                 prev = data
                 self.print_line()

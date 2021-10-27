@@ -1,47 +1,44 @@
 """
-Views for organization administrative actions
+View for organization administrative actions (/org endpoint).
 """
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
-from django.views.decorators.csrf import csrf_protect
 from django.http import JsonResponse
 from django.template import loader
-from django.conf import settings
-from .forms import OrgAdminUserPermissionForm
+from django.utils.translation import override
+from django.utils.translation import ugettext_lazy as _
+from django.views.decorators.csrf import csrf_protect
+from django_grainy.models import UserPermission
+from django_handleref.models import HandleRefModel
+from grainy.const import PERM_READ
 
 from peeringdb_server.models import (
-    User,
-    Organization,
-    Network,
-    NetworkContact,
-    InternetExchange,
     Facility,
+    InternetExchange,
+    Network,
+    Organization,
+    User,
     UserOrgAffiliationRequest,
 )
+from peeringdb_server.util import check_permissions
 
-import django_namespace_perms.util as nsp
-from django_namespace_perms.constants import *
-from django_namespace_perms.models import UserPermission
-
-from django_handleref.models import HandleRefModel
-
-from django.utils.translation import ugettext_lazy as _
-from django.utils.translation import override
+from .forms import OrgAdminUserPermissionForm
 
 
 def save_user_permissions(org, user, perms):
     """
-    Save user permissions for the specified org and user
+    Save user permissions for the specified org and user.
 
-    perms should be a dict of permissioning ids and permission levels
+    Perms should be a dict of permissioning ids and permission levels.
     """
 
     # wipe all the user's perms for the targeted org
 
-    user.userpermission_set.filter(namespace__startswith=org.nsp_namespace).delete()
+    user.grainy_permissions.filter(namespace__startswith=org.grainy_namespace).delete()
 
     # collect permissioning namespaces from the provided permissioning ids
 
-    nsp_perms = {}
+    grainy_perms = {}
 
     for id, permissions in list(perms.items()):
 
@@ -49,55 +46,49 @@ def save_user_permissions(org, user, perms):
             permissions = permissions | PERM_READ
 
         if id == "org.%d" % org.id:
-            nsp_perms[org.nsp_namespace] = permissions
-            nsp_perms[
-                NetworkContact.nsp_namespace_from_id(org.id, "*", "private")
+            grainy_perms[org.grainy_namespace] = permissions
+            grainy_perms[
+                f"{org.grainy_namespace}.network.*.poc_set.private"
             ] = permissions
         elif id == "net":
-            nsp_perms[
-                Network.nsp_namespace_from_id(org.id, "*").strip(".*")
-            ] = permissions
-            nsp_perms[
-                NetworkContact.nsp_namespace_from_id(org.id, "*", "private")
+            grainy_perms[f"{org.grainy_namespace}.network"] = permissions
+            grainy_perms[
+                f"{org.grainy_namespace}.network.*.poc_set.private"
             ] = permissions
         elif id == "ix":
-            nsp_perms[
-                InternetExchange.nsp_namespace_from_id(org.id, "*").strip(".*")
-            ] = permissions
+            grainy_perms[f"{org.grainy_namespace}.internetexchange"] = permissions
         elif id == "fac":
-            nsp_perms[
-                Facility.nsp_namespace_from_id(org.id, "*").strip(".*")
-            ] = permissions
+            grainy_perms[f"{org.grainy_namespace}.facility"] = permissions
         elif id.find(".") > -1:
             id = id.split(".")
             if id[0] == "net":
-                nsp_perms[Network.nsp_namespace_from_id(org.id, id[1])] = permissions
-                nsp_perms[
-                    NetworkContact.nsp_namespace_from_id(org.id, id[1], "private")
+                grainy_perms[f"{org.grainy_namespace}.network.{id[1]}"] = permissions
+                grainy_perms[
+                    f"{org.grainy_namespace}.network.{id[1]}.poc_set.private"
                 ] = permissions
             elif id[0] == "ix":
-                nsp_perms[
-                    InternetExchange.nsp_namespace_from_id(org.id, id[1])
+                grainy_perms[
+                    f"{org.grainy_namespace}.internetexchange.{id[1]}"
                 ] = permissions
             elif id[0] == "fac":
-                nsp_perms[Facility.nsp_namespace_from_id(org.id, id[1])] = permissions
+                grainy_perms[f"{org.grainy_namespace}.facility.{id[1]}"] = permissions
 
     # save
-    for ns, p in list(nsp_perms.items()):
-        UserPermission.objects.create(namespace=ns, permissions=p, user=user)
+    for ns, p in list(grainy_perms.items()):
+        UserPermission.objects.create(namespace=ns, permission=p, user=user)
 
-    return nsp_perms
+    return grainy_perms
 
 
 def load_all_user_permissions(org):
     """
-    Returns dict of all users with all their permissions for
-    the given org
+    Return dict of all users with all their permissions for
+    the given org.
     """
 
     rv = {}
     for user in org.usergroup.user_set.all():
-        uperms, perms = load_user_permissions(org, user)
+        uperms, perms = load_entity_permissions(org, user)
         rv[user.id] = {
             "id": user.id,
             "perms": perms,
@@ -107,44 +98,50 @@ def load_all_user_permissions(org):
 
 
 def load_user_permissions(org, user):
+    return load_entity_permissions(org, user)
+
+
+def load_entity_permissions(org, entity):
     """
-    Returns user's permissions for the specified org
+    Return entity's permissions for the specified org.
     """
 
-    # load all of the user's permissions related to this org
-    uperms = {
-        p.namespace: p.permissions
-        for p in user.userpermission_set.filter(namespace__startswith=org.nsp_namespace)
+    # load all of the entity's permissions related to this org
+    entity_perms = {
+        p.namespace: p.permission
+        for p in entity.grainy_permissions.filter(
+            namespace__startswith=org.grainy_namespace
+        )
     }
 
     perms = {}
 
-    extract_permission_id(uperms, perms, org, org)
+    extract_permission_id(entity_perms, perms, org, org)
 
-    # extract user's permissioning ids from nsp_namespaces targeting
+    # extract entity's permissioning ids from grainy_namespaces targeting
     # organization's entities
     for model in [Network, InternetExchange, Facility]:
-        extract_permission_id(uperms, perms, model, org)
+        extract_permission_id(entity_perms, perms, model, org)
 
-    # extract user's permissioning ids from nsp_namespaces targeting
-    # organization's entities by their id (eg user has perms only
+    # extract entity's permissioning ids from grainy_namespaces targeting
+    # organization's entities by their id (eg entity has perms only
     # to THAT specific network)
     for net in org.net_set_active:
-        extract_permission_id(uperms, perms, net, org)
+        extract_permission_id(entity_perms, perms, net, org)
 
     for net in org.ix_set_active:
-        extract_permission_id(uperms, perms, net, org)
+        extract_permission_id(entity_perms, perms, net, org)
 
     for net in org.fac_set_active:
-        extract_permission_id(uperms, perms, net, org)
+        extract_permission_id(entity_perms, perms, net, org)
 
-    return uperms, perms
+    return entity_perms, perms
 
 
 def permission_ids(org):
     """
-    returns a dict of a valid permissioning ids for
-    the specified organization
+    Return a dict of a valid permissioning ids for
+    the specified organization.
     """
 
     perms = {
@@ -180,29 +177,31 @@ def permission_ids(org):
 
 def extract_permission_id(source, dest, entity, org):
     """
-    extract a user's permissioning id for the specified
-    entity from source <dict> and store it in dest <dict>
+    Extract a user's permissioning id for the specified
+    entity from source <dict> and store it in dest <dict>.
 
-    source should be a dict containing django-namespace-perms
-    (namespace, level) items
+    Source should be a dict containing django-namespace-perms
+    (namespace, level) items.
 
-    dest should be a dict where permission ids are to be
-    exracted to
+    Dest should be a dict where permission ids are to be
+    exracted to.
 
-    entity can either be a HandleRef instance or clas
+    Entity can either be a HandleRef instance or class.
 
-    org needs to be an Organization instance that owns the
-    entity
+    Org must be an Organization instance that owns the
+    entity.
     """
 
     if isinstance(entity, HandleRefModel):
         # instance
-        k = entity.nsp_namespace
+        k = entity.grainy_namespace
         j = "%s.%d" % (entity.ref_tag, entity.id)
     else:
         # class
-        k = entity.nsp_namespace_from_id(org.id, "*").strip(".*")
         j = entity.handleref.tag
+        namespace = entity.Grainy.namespace()
+        k = f"{org.grainy_namespace}.{namespace}"
+
     if k in source:
         dest[j] = source[k]
 
@@ -210,9 +209,9 @@ def extract_permission_id(source, dest, entity, org):
 def org_admin_required(fnc):
     """
     Decorator function that ensures that the requesting user
-    has administrative rights to the targeted organization
+    has administrative rights to the targeted organization.
 
-    Also sets "org" in kwargs
+    Also sets "org" in kwargs.
     """
 
     def callback(request, **kwargs):
@@ -223,7 +222,7 @@ def org_admin_required(fnc):
 
         try:
             org = Organization.objects.get(id=org_id)
-            if not nsp.has_perms(request.user, org.nsp_namespace_manage, "update"):
+            if not check_permissions(request.user, org.grainy_namespace_manage, "u"):
                 return JsonResponse({}, status=403)
             kwargs["org"] = org
             return fnc(request, **kwargs)
@@ -238,11 +237,11 @@ def org_admin_required(fnc):
 def target_user_validate(fnc):
     """
     Decorator function that ensures that the targeted user
-    is a member of the targeted organization
+    is a member of the targeted organization.
 
-    Should be below org_admin_required
+    Should be below org_admin_required.
 
-    Also sets "user" in kwargs
+    Also sets "user" in kwargs.
     """
 
     def callback(request, **kwargs):
@@ -271,7 +270,7 @@ def target_user_validate(fnc):
 @org_admin_required
 def users(request, **kwargs):
     """
-    Returns JsonResponse with a list of all users in the specified org
+    Returns JsonResponse with a list of all users in the specified org.
     """
 
     org = kwargs.get("org")
@@ -296,7 +295,7 @@ def users(request, **kwargs):
 @target_user_validate
 def manage_user_delete(request, **kwargs):
     """
-    remove user from org
+    Remove user from org.
     """
 
     org = kwargs.get("org")
@@ -314,10 +313,10 @@ def manage_user_delete(request, **kwargs):
 @target_user_validate
 def manage_user_update(request, **kwargs):
     """
-    udpate a user in the org
+    Udpate a user in the org.
 
-    right now this only allows for moving the user either
-    to admin or member group
+    Currently, this only allows moving the user to either
+    admin or member group.
     """
 
     org = kwargs.get("org")
@@ -340,14 +339,14 @@ def manage_user_update(request, **kwargs):
 @org_admin_required
 def user_permissions(request, **kwargs):
     """
-    Returns JsonRespone with list of user's permissions for the targeted
-    org an entities under it
+    Return JsonRespone with list of user's permissions for the targeted
+    org an entities under it.
 
     Permisions are returned as a dict of permissioning ids and permission
     levels.
 
     Permissioning ids serve as a wrapper for actual permissioning namespaces
-    so we can expose them to the organization admins for changes without allowing
+    so they can be exposed to the organization admins for changes without allowing
     them to set permissioning namespaces directly.
     """
 
@@ -366,7 +365,7 @@ def user_permissions(request, **kwargs):
 @target_user_validate
 def user_permission_update(request, **kwargs):
     """
-    Update/Add a user's permission
+    Update/Add a user's permission.
 
     perms = permission level
     entity = permission id
@@ -394,7 +393,7 @@ def user_permission_update(request, **kwargs):
 @target_user_validate
 def user_permission_remove(request, **kwargs):
     """
-    Remove a user's permission
+    Remove a user's permission.
 
     entity = permission id
     """
@@ -414,11 +413,11 @@ def user_permission_remove(request, **kwargs):
 @org_admin_required
 def permissions(request, **kwargs):
     """
-    Returns list of permissioning ids with labels that
-    are valid to be permissioned out to regular org users
+    Return list of permissioning ids with labels that
+    are valid to be permissioned out to regular org users.
 
     Permissioning ids serve as a wrapper for actual permissioning namespaces
-    so we can expose them to the organization admins for changes without allowing
+    so they can be exposed to the organization admins for changes without allowing
     them to set permissioning namespaces directly.
     """
 
@@ -434,7 +433,7 @@ def permissions(request, **kwargs):
 @org_admin_required
 def uoar_approve(request, **kwargs):
     """
-    Approve a user request to affiliate with the organization
+    Approve a user request to affiliate with the organization.
     """
 
     org = kwargs.get("org")
@@ -485,15 +484,13 @@ def uoar_approve(request, **kwargs):
     except UserOrgAffiliationRequest.DoesNotExist:
         return JsonResponse({"status": "ok"})
 
-    return JsonResponse({"status": "ok"})
-
 
 @login_required
 @csrf_protect
 @org_admin_required
 def uoar_deny(request, **kwargs):
     """
-    Approve a user request to affiliate with the organization
+    Approve a user request to affiliate with the organization.
     """
 
     org = kwargs.get("org")
@@ -502,9 +499,8 @@ def uoar_deny(request, **kwargs):
         uoar = UserOrgAffiliationRequest.objects.get(id=request.POST.get("id"))
         if uoar.org != org:
             return JsonResponse({}, status=403)
-
         try:
-            user = uoar.user
+            uoar.user
             uoar.deny()
 
         except User.DoesNotExist:

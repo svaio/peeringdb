@@ -18,6 +18,15 @@ PeeringDB = {
   recaptcha_loaded : function() {
     return (typeof grecaptcha == "object");
   },
+
+  handle_xhr_json_error : function(response, name) {
+    if(response.responseJSON && response.responseJSON[name]) {
+      return response.responseJSON[name]
+    } else {
+      return twentyc.editable.error.humanize("Http"+response.status);
+    }
+  },
+
   init : function() {
     this.InlineSearch.init_search();
 
@@ -83,12 +92,10 @@ PeeringDB = {
           }
           if('undefined' == typeof(reply.translation) || 'undefined' == typeof(reply.translation.translatedText)){
               note_o.parent().append( '<div class="editable popin error">Unknown error</div>')
-              console.log(reply);
               return;
           }
           var translation = reply.translation.translatedText.split(' xx22xx ').join('</p><p>');
           note_o.parent().append( '<div class="editable popin info"><p>' + translation + '</p></div>')
-          console.log(translation);
        })
        .fail(function(a,b,c){
          console.log(a,b,c);
@@ -154,6 +161,88 @@ PeeringDB = {
     return value
   },
 
+  // if an api response includes a "geovalidation warning"
+  // field in its metadata, display that warning
+
+   add_geo_warning : function(meta, endpoint) {
+    $('.geovalidation-warning').each(function(){
+      let popin = $(this);
+      let warning = meta.geovalidation_warning;
+      if (endpoint == popin.data("edit-geotag")){
+        popin.text(warning);
+        popin.removeClass("hidden").show();
+
+      }
+    })
+   },
+
+   // if an api response includes a "geo"
+   add_suggested_address : function(request, endpoint) {
+
+    let popin = $('.suggested-address').filter(function() {
+      return $(this).data("edit-geotag") == endpoint
+    });
+    if (popin === null){
+      return
+    }
+
+    // Fill in text to each field
+    let suggested_address = request.meta.suggested_address;
+    let address_fields = popin.find('div, span').filter(function(){
+      return $(this).data("edit-field")
+    })
+    address_fields.each(function(){
+      let elem = $(this);
+      let field = elem.data("edit-field");
+      let value = suggested_address[field];
+      if (value){
+        if (field === "city" || field === "state"){
+          value += ",";
+        }
+        elem.text(value);
+      }
+
+    })
+
+    // Initialize the Submit button
+    let button = popin.find("a.btn.suggestion-accept");
+    PeeringDB.init_accept_suggestion(button, request, endpoint);
+
+    // Show the popin
+    popin.removeClass("hidden").show();
+   },
+
+  // initializes the "Accept suggestion" button
+
+  init_accept_suggestion : function(button, response, endpoint){
+
+    let payload = response.data[0];
+    // Overwrite returned instance with the suggested data
+    Object.assign(payload, response.meta.suggested_address);
+
+    // No need to have latitude or longitude
+    // in the payload since it will get
+    // geocoded again
+
+    delete payload.latitude;
+    delete payload.longitude;
+
+
+    // Set up PUT request on click
+    button.click(function(event){
+      $("#view").editable("loading-shim", "show");
+      PeeringDB.API.request(
+        "PUT",
+        endpoint,
+        payload.id,
+        payload,
+        function(){
+          PeeringDB.refresh()
+        }
+      )
+    });
+
+  },
   // searches the page for all editable forms that
   // have data-check-incomplete attribute set and
   // displays a notification if any of the fields
@@ -164,7 +253,6 @@ PeeringDB = {
       var status = { incomplete : false};
       $(this).find('[data-edit-name]').each(function() {
         var value = $(this).html().trim();
-        var name = $(this).data("edit-name");
         var field = $(this).prev('.view_field');
         var group = field.data("notify-incomplete-group")
 
@@ -231,9 +319,10 @@ PeeringDB = {
   refresh: function() {
     window.document.location.href = window.document.location.href;
   }
+
 }
 
-function moveCursorToEnd(el) {
+function moveCursorToEnd(el) { // lgtm[js/unused-local-variable]
     if (typeof el.selectionStart == "number") {
         el.selectionStart = el.selectionEnd = el.value.length;
     } else if (typeof el.createTextRange != "undefined") {
@@ -250,6 +339,7 @@ function moveCursorToEnd(el) {
  * @class ViewTools
  * @namespace PeeringDB
  */
+
 
 PeeringDB.ViewTools = {
 
@@ -286,14 +376,43 @@ PeeringDB.ViewTools = {
    */
 
   after_submit : function(container, data) {
-    var target = container.data("edit-target")
+
+    const addressFields = ["address1", "address2", "city", "state", "zipcode", "geocode"];
+    var target = container.data("edit-target");
     if(target == "api:ix:update") {
       this.apply_data(container, data, "tech_phone");
       this.apply_data(container, data, "policy_phone");
     }
-  }
+    if (target === "api:fac:update" || target === "api:org:update") {
+      addressFields.forEach(field => this.apply_data(container, data, field));
+      this.update_geocode(data);
+    }
+    if (target == "api:fac:update") {
 
+      // on facility `region_continent` is read-only and determined
+      // from the country during the save so we need to update it manually
+      // when the data comes back from the api
+
+      $('[data-edit-name="region_continent"]').
+        data("edit-value", data.region_continent).
+        text(data.region_continent);
+    }
+  },
+
+  update_geocode: function(data){
+    const geo_field = $("#geocode_active");
+    if (data.latitude && data.longitude){
+      let link = `https://maps.google.com/?q=${data.latitude},${data.longitude}`
+      let contents = `<a href="${link}">${data.latitude}, ${data.longitude}</a>`
+      geo_field.empty().append(contents);
+      $("#geocode_inactive").addClass("hidden").hide();
+    } else if (data.latitude === null && data.longitude === null) {
+      $("#geocode_active").empty();
+      $("#geocode_inactive").removeClass("hidden").show();
+    }
+  }
 }
+
 
 PeeringDB.ViewActions = {
 
@@ -314,6 +433,26 @@ PeeringDB.ViewActions.actions.ix_ixf_preview = function(netId) {
   $("#ixf-preview-modal").modal("show");
   var preview = new PeeringDB.IXFPreview()
   preview.request(netId, $("#ixf-log"));
+}
+
+
+PeeringDB.ViewActions.actions.ix_ixf_request_import = function(ixId) {
+  var button =  $('[data-view-action="ix_ixf_request_import"]')
+  button.attr("title","").tooltip("hide").attr("data-trigger", "manual");
+  $.post(`/api/ix/${ixId}/request_ixf_import`).done(
+    () => {
+      $('.ixf-import-request-status').addClass("alert alert-warning").text(gettext("Queued"))
+    }
+  ).fail(
+    (response,typ,msg) => {
+      if(response.status == 429) {
+        let seconds = response.responseJSON.meta.error.match(/(\d+)/)[0]
+        button.attr('title', gettext("Please wait before requesting another import.")+" "+gettext("Available in: ")+seconds+" "+gettext("seconds")).tooltip("show");
+      } else {
+        button.attr('title',msg).tooltip("show");
+      }
+    }
+  );
 }
 
 
@@ -409,7 +548,7 @@ PeeringDB.IXFProposals = twentyc.cls.define(
       $.ajax({
         method: "POST",
         url: path
-      }).done(PeeringDB.refresh);
+      }).done(PeerignDB.refresh);
     },
 
     /**
@@ -484,7 +623,6 @@ PeeringDB.IXFProposals = twentyc.cls.define(
 
     delete : function(row) {
       var data=this.collect(row);
-      var proposals = row.closest("[data-ixf-proposals-ix]")
       row.find('.loading-shim').show();
 
       return PeeringDB.API.request(
@@ -611,7 +749,6 @@ PeeringDB.IXFProposals = twentyc.cls.define(
 
     add : function(row) {
       var data=this.collect(row);
-      var proposals = row.closest("[data-ixf-proposals-ix]")
 
       row.find('.loading-shim').show();
       row.find('.errors').hide()
@@ -724,8 +861,11 @@ PeeringDB.IXFProposals = twentyc.cls.define(
             .insertBefore(element);
           element.addClass('validation-error')
         }
+      } else if(response.status == 403) {
+        info = [gettext("You do not have permissions to perform this action")]
       }
-     if(response.responseJSON && response.responseJSON.non_field_errors) {
+
+      if(response.responseJSON && response.responseJSON.non_field_errors) {
         info = [];
         var i;
         for(i in response.responseJSON.non_field_errors)
@@ -1044,15 +1184,30 @@ PeeringDB.InlineSearch = {
     if(this.initialized)
       return
 
+    this.keystrokeTimeout = new twentyc.util.SmartTimeout(
+      () => {}, 500
+
+    );
+
     $('#search').keypress(function(e) {
       if(e.which == 13) {
+        PeeringDB.InlineSearch.keystrokeTimeout.cancel();
         window.document.location.href= "/search?q="+$(this).val()
         e.preventDefault();
       }
     });
 
     $('#search').keyup(function(e) {
-      PeeringDB.InlineSearch.search($(this).val());
+      if(e.which == 13)
+        return;
+
+      PeeringDB.InlineSearch.keystrokeTimeout.set(
+        () => {
+          PeeringDB.InlineSearch.search($(this).val());
+        },
+        500
+      );
+
     });
 
     this.searchResult = $('#search-result');
@@ -1102,8 +1257,7 @@ PeeringDB.InlineSearch = {
   },
 
   apply_result : function(data) {
-    var i, row, rowNode, type, resultNodes = PeeringDB.InlineSearch.resultNodes;
-
+    var i, row, rowNode, type;
     var count = 0;
 
     for(type in data) {
@@ -1125,12 +1279,12 @@ PeeringDB.InlineSearch = {
         rowNode.addClass("result_row")
         rowNode.append($('<a>').attr("href", "/"+type+"/"+row.id).text(row.name));
 
-        var sponsor = (twentyc.data.get("sponsors")[row.org_id] || {}).name;
-        if(sponsor) {
+        var sponsor = (twentyc.data.get("sponsors")[row.org_id] || {});
+        if(sponsor && sponsor.name) {
           rowNode.append($('<a>').
             attr("href", "/sponsors").
-            addClass("sponsor "+sponsor).
-            text(sponsor+" sponsor"));
+            addClass("sponsor "+sponsor.css).
+            text(sponsor.name+" "+gettext("sponsor")));
         }
 
         this.resultNodes[type].lst.append(rowNode)
@@ -1190,6 +1344,124 @@ PeeringDB.API = {
 }
 
 /**
+ * editable key management endpoint
+ */
+
+twentyc.editable.action.register(
+  "revoke-org-key",
+  {
+    execute:  function(trigger, container) {
+
+    }
+  }
+)
+
+twentyc.editable.module.register(
+  "key_perm_listing",
+  {
+    loading_shim : true,
+    PERM_UPDATE : 0x02,
+    PERM_CREATE : 0x04,
+    PERM_DELETE : 0x08,
+
+    init : function() {
+      this.listing_init();
+      this.container.on("listing:row-add", function(e, rowId, row, data, me) {
+        row.editable("payload", {
+          key_prefix : data.key_prefix,
+          org_id : data.org_id
+        })
+      });
+    },
+
+    org_id : function() {
+      return this.container.data("edit-id");
+    },
+    key_prefix : function() {
+      return this.container.data("edit-key-prefix");
+    },
+    prepare_data : function(extra) {
+      var perms = 0;
+      if(this.target.data.perm_u)
+        perms |= this.PERM_UPDATE;
+      if(this.target.data.perm_c)
+        perms |= this.PERM_CREATE;
+      if(this.target.data.perm_d)
+        perms |= this.PERM_DELETE;
+      this.target.data.perms = perms;
+      if(extra)
+        $.extend(this.target.data, extra);
+    },
+
+    add : function(rowId, trigger, container, data) {
+
+      var i, labels = twentyc.data.get("key_permissions");
+
+      for(i=0; i<labels.length; i++) {
+        if(labels[i].id == data.entity) {
+          data.entity = labels[i].name;
+          break;
+        }
+      }
+
+      data.perm_u = ((data.perms & this.PERM_UPDATE) == this.PERM_UPDATE)
+      data.perm_c = ((data.perms & this.PERM_CREATE) == this.PERM_CREATE)
+      data.perm_d = ((data.perms & this.PERM_DELETE) == this.PERM_DELETE)
+
+      this.listing_add(rowId, trigger, container, data);
+    },
+
+    execute_add : function(trigger, container) {
+      this.components.add.editable("export", this.target.data);
+      var data = this.target.data;
+      this.prepare_data();
+      this.target.execute("update", this.components.add, function(response) {
+        this.add(data.entity, trigger, container, data);
+      }.bind(this));
+    },
+
+    execute_remove : function(trigger, container) {
+      this.components.add.editable("export", this.target.data);
+      var row = this.row(trigger);
+      this.prepare_data({perms:0, entity:row.data("edit-id")});
+      this.target.execute("remove", trigger, function(response) {
+        this.listing_execute_remove(trigger, container);
+      }.bind(this));
+    },
+
+    submit : function(rowId, data, row, trigger, container) {
+      this.target.data = data;
+      this.prepare_data({entity:rowId});
+      this.target.execute("update", row, function() {
+        this.listing_submit(rowId, data, row, trigger, container);
+      }.bind(this));
+    },
+
+    load : function(keyPrefix) {
+      var me = this, target = this.get_target();
+      if(!keyPrefix) {
+        me.clear();
+        return;
+      }
+      this.container.data("edit-key-prefix", keyPrefix);
+      target.data = {"key_prefix":keyPrefix, "org_id":this.org_id()}
+      target.execute(null, null, function(data) {
+        me.clear();
+        var k;
+        for(k in data.user_permissions) {
+          var perms = {};
+          perms.perms = data.user_permissions[k];
+          perms.entity = k;
+          me.add(k, null, me.container, perms);
+        };
+      });
+    }
+
+  },
+  "listing"
+);
+
+/**
  * editable uoar management endpoint
  */
 
@@ -1245,7 +1517,7 @@ twentyc.editable.module.register(
       data.perm_c = ((data.perms & this.PERM_CREATE) == this.PERM_CREATE)
       data.perm_d = ((data.perms & this.PERM_DELETE) == this.PERM_DELETE)
 
-      var row = this.listing_add(rowId, trigger, container, data);
+      this.listing_add(rowId, trigger, container, data);
     },
 
     execute_add : function(trigger, container) {
@@ -1276,7 +1548,7 @@ twentyc.editable.module.register(
     },
 
     load : function(userId) {
-      var me = this; target = this.get_target();
+      var me = this, target = this.get_target();
       if(!userId) {
         me.clear();
         return;
@@ -1285,9 +1557,10 @@ twentyc.editable.module.register(
       target.data= {"user_id":userId, "org_id":this.org_id()}
       target.execute(null, null, function(data) {
         me.clear();
-        for(k in data.user_permissions) {
+        var k;
+        for(k in data.key_perms) {
           var perms = {};
-          perms.perms = data.user_permissions[k];
+          perms.perms = data.key_perms[k];
           perms.entity = k;
           me.add(k, null, me.container, perms);
         };
@@ -1297,6 +1570,7 @@ twentyc.editable.module.register(
   },
   "listing"
 );
+
 
 twentyc.editable.module.register(
   "user_listing",
@@ -1329,6 +1603,94 @@ twentyc.editable.module.register(
       }.bind(this));
     },
 
+
+  },
+  "listing"
+);
+
+
+twentyc.editable.module.register(
+  "key_listing",
+  {
+    loading_shim : true,
+    org_id : function() {
+      return this.container.data("edit-id");
+    },
+
+    api_key_popin : function(key) {
+      const message = gettext("Your API key was successfully created. "
+                  + "Write this key down some place safe. "
+                  + "Keys cannot be recovered once  "
+                  + "this message is exited or overwritten.");
+
+      var panel = $('<div>').addClass("alert alert-success marg-top-15").
+        append($('<div>').text(message)).
+        append($('<div>').addClass("center marg-top-15").text(key))
+
+      this.container.find("#api-key-popin-frame").empty().append(panel)
+    },
+
+    remove : function(id, row, trigger, container) {
+      var b = PeeringDB.confirm(gettext("Remove") + " " +row.data("edit-label"), "remove");  ///
+      var me = this;
+      $(this.target).on("success", function(ev, data) {
+        if(b)
+          me.listing_remove(id, row, trigger, container);
+      });
+      if(b) {
+        this.target.data = { prefix : id, org_id : this.org_id() };
+        this.target.execute("delete");
+      } else {
+        $(this.target).trigger("success", [gettext("Canceled")]);  ///
+      }
+    },
+
+    execute_add : function(trigger, container) {
+      this.components.add.editable("export", this.target.data);
+      var data = this.target.data;
+      this.target.execute("add", this.components.add, function(response) {
+        if(response.readonly)
+          response.name = response.name + " (read-only)";
+        this.add(data.entity, trigger, container, response);
+        this.api_key_popin(response.key)
+      }.bind(this));
+    },
+
+    add : function(rowId, trigger, container, data) {
+      var row = this.listing_add(data.prefix, trigger, container, data);
+      row.attr("data-edit-label", data.prefix + " - " + data.name)
+      row.data("edit-label", data.prefix + " - " + data.name)
+      var update_key_form = row.find(".update-key")
+      update_key_form.find(".popin, .loading-shim").detach()
+      update_key_form.editable()
+      return row
+    },
+
+    execute_update : function(trigger, container) {
+      var row = this.row(trigger);
+      row.editable("export", this.target.data);
+      var data = this.target.data;
+      this.target.execute("update", trigger, function(response) {
+      }.bind(this));
+    },
+
+    execute_revoke : function(trigger, container) {
+
+      var row = this.row(trigger);
+      var b = PeeringDB.confirm(gettext("Revoke key") + " " +row.data("edit-label"), "remove");
+
+      if(!b) {
+        container.editable("loading-shim", "hide")
+        return
+      }
+
+      this.components.add.editable("export", this.target.data);
+      var data = this.target.data;
+      var id = data.prefix = row.data("edit-id")
+      this.target.execute("revoke", trigger, function(response) {
+        this.listing_remove(id, row, trigger, container);
+      }.bind(this));
+    }
 
   },
   "listing"
@@ -1382,10 +1744,34 @@ twentyc.editable.target.register(
     execute : function() {
       var i, data = this.data_clean(true);
       data.reftag = this.args[1]
+
       for(i in data) {
         if(data[i] && data[i].join)
           data[i] = data[i].join(",")
       }
+
+      if(data.reftag == "ix") {
+        // we want the unit formatted values in the url paramters
+        // so that the unit selection gets persisted in the url
+        let capacity = $('[data-edit-name="capacity__gte"]').data("edit-input-instance");
+        if(data["capacity__gte"])
+          data["capacity__gte"] = capacity.formatted()
+      }
+
+
+      if(parseInt(data.distance) > 0) {
+        if(data.country__in && data.country__in.split(",").length > 1) {
+          return $(this).trigger("error", {"type": "ValidationError", "field": "country__in", "info": "Please only select one country when filtering by distance."});
+        }
+        data.country = data.country__in;
+        delete data.country__in;
+        data.distance = this.sender.find('[data-edit-name="distance"]').data("edit-input-instance").formatted();
+      } else if(typeof(data.distance) != "undefined"){
+        delete data.distance;
+      }
+
+      if(data["undefined"])
+        delete data["undefined"]
       window.location.replace(
         '?'+$.param(data)
       );
@@ -1400,6 +1786,14 @@ twentyc.editable.target.register(
           data[i] = data[i].join(",")
         }
       }
+
+      if(parseInt(data.distance) > 0) {
+        data.country = data.country__in;
+        delete data.country__in;
+      } else if(typeof(data.distance) != "undefined"){
+        delete data.distance;
+      }
+
 
       data.limit = this.limit || 250;
       data.depth = 1;
@@ -1439,11 +1833,11 @@ twentyc.editable.target.register(
 
               row = twentyc.editable.templates.copy("advanced-search-"+reftag+"-item")
 
-              if(d.sponsorship) {
+              if(d.sponsorship && d.sponsorship.name) {
                 $('<a>').
                   attr("href", "/sponsors").
-                  addClass("sponsor "+d.sponsorship).
-                  text(d.sponsorship.toLowerCase()+" sponsor").
+                  addClass("sponsor "+d.sponsorship.css).
+                  text(d.sponsorship.name.toLowerCase()+" "+gettext("sponsor")).
                   insertAfter(row.find('.name'));
               }
 
@@ -1479,15 +1873,15 @@ twentyc.editable.target.register(
       data.ix_count = data.netixlan_set.length;
       data.fac_count = data.netfac_set.length;
       data.info_traffic_raw = twentyc.data.get("traffic_speed_by_label")[data.info_traffic] || 0;
-      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {}).name;
+      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {});
     },
 
     finalize_data_ix : function(data) {
-      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {}).name;
+      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {});
     },
 
     finalize_data_fac : function(data) {
-      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {}).name;
+      data.sponsorship = (twentyc.data.get("sponsors")[data.org_id] || {});
     }
   },
   "base"
@@ -1546,7 +1940,13 @@ twentyc.editable.target.register(
           else
             me.trigger("success", {});
         }
-      ).fail(function(r) {
+      ).done(function(r) {
+        if (r.meta && r.meta.geovalidation_warning){
+          PeeringDB.add_geo_warning(r.meta, endpoint);
+        } else if (r.meta && r.meta.suggested_address){
+          PeeringDB.add_suggested_address(r, endpoint);
+        }
+      }).fail(function(r) {
         if(r.status == 400) {
           var k,i,info=[gettext("The server rejected your data")]; ///
           for(k in r.responseJSON) {
@@ -1578,6 +1978,8 @@ twentyc.editable.target.register(
         } else {
           if(r.responseJSON && r.responseJSON.meta && r.responseJSON.meta.error)
              var info = r.responseJSON.meta.error;
+          else if(r.status == 403)
+             var info = gettext("You do not have permissions to perform this action")
           else
              var info = r.status+" "+r.statusText
 
@@ -1659,7 +2061,6 @@ twentyc.editable.module.register(
     submit : function(id, data, row, trigger, container) {
       data._id = id;
       var me = this;
-      var sentData = data;
       this.target.data = data;
       this.target.args[2] = "update"
       this.target.context = row;
@@ -1812,6 +2213,10 @@ twentyc.editable.module.register(
     },
 
     finalize_update_netixlan : function(rowId, row, data) {
+      var pretty_speed = PeeringDB.pretty_speed(data.speed)
+      row.find(".speed").data("edit-content-backup", pretty_speed)
+      row.find(".speed").data("edit-value", data.speed)
+      row.find(".speed").text(pretty_speed)
       if(data.operational)
         row.addClass("operational")
       else
@@ -1999,9 +2404,29 @@ twentyc.editable.input.register(
   "autocomplete",
   {
     confirm_handlers : {},
+
+
+    make : function() {
+      let input = this.string_make();
+      let multi = this.source.data('edit-multiple')
+
+      if(multi) {
+        let choices = $('<div>').addClass('autocomplete-choices')
+        input.data('choices_element', choices);
+      }
+
+      return input;
+    },
+
     wire : function() {
+      var widget = this;
       var input = this.element;
-      var url = "/autocomplete/"+this.source.data("edit-autocomplete")
+
+      var multi = this.source.data('edit-multiple')
+
+      if(multi) {
+        this.element.data('choices_element').insertAfter(this.element);
+      }
 
       input.yourlabsAutocomplete(
         {
@@ -2012,11 +2437,23 @@ twentyc.editable.input.register(
           inputClick : function(e) { return ; }
         }
       ).input.bind("selectChoice", function(a,b) {
-        input.data("value" , b.data("value"));
-        input.val(b.text());
-        input.removeClass("invalid");
-        input.addClass("valid");
-        this.render_confirm(b.data("value"));
+
+        if(multi) {
+
+          // multiple-select support
+
+          widget.multi_add(b.data("value"), b.text());
+
+        } else {
+
+          // single select only
+
+          input.data("value" , b.data("value"));
+          input.val(b.text());
+          input.removeClass("invalid");
+          input.addClass("valid");
+          this.render_confirm(b.data("value"));
+        }
       }.bind(this));
       // turn off auto-complete firefox workaround
       if(/Firefox/i.test(navigator.userAgent)) {
@@ -2032,6 +2469,49 @@ twentyc.editable.input.register(
 
     },
 
+
+    multi_add : function(value, text) {
+      // update input value
+      let selected = this.element.data("value")
+      if(!selected)
+        selected = []
+      else
+        selected = selected.split(",")
+
+      selected.push(value);
+      this.element.data("value", selected.join(","));
+      this.element.val()
+
+      // update choice display
+      let choices_element = this.element.data('choices_element')
+      let row = $('<div class="alert autocomplete-choice alert-info">').attr('data-value', value);
+      row.attr("data-toggle","tooltip").attr("title", gettext("Click to remove") ).attr("data-placement", "left").tooltip()
+      row.on('click',()=> {
+        row.tooltip("hide")
+        this.multi_remove(value);
+      });
+
+      choices_element.append(
+        row.text(text)
+      );
+    },
+
+    multi_remove : function(value) {
+      let selected = this.element.data("value")
+      let choices_element = this.element.data('choices_element')
+      if(!selected)
+        return;
+      else
+        selected = selected.split(",")
+
+      var index = selected.indexOf(""+value);
+      if(index > -1)
+        selected.splice(index, 1)
+      this.element.data("value", selected.join(","));
+
+      choices_element.find(`[data-value="${value}"]`).detach();
+    },
+
     reset_confirm : function() { this.confirm_node().empty(); },
     render_confirm : function(id) {
       var hdl;
@@ -2042,9 +2522,15 @@ twentyc.editable.input.register(
       return this.source.siblings("[data-autocomplete-confirm]")
     },
     reset : function(resetValue) {
-      twentyc.editable.input.get("base").prototype.reset.call(this, resetValue);
-      this.element.data("value","")
-      this.reset_confirm();
+      let multi = this.source.data('edit-multiple')
+      if(resetValue) {
+        twentyc.editable.input.get("base").prototype.reset.call(this, resetValue);
+        this.element.data("value","")
+        this.reset_confirm();
+        if(multi) {
+          this.element.data("choices_element").empty()
+        }
+      }
     },
     get : function() {
       var val = this.element.data("value");
@@ -2056,17 +2542,45 @@ twentyc.editable.input.register(
       return val;
     },
     set : function(value) {
+      let multi = this.source.data('edit-multiple')
+
+      if(multi && value) {
+
+
+        let i, item;
+        value = value.split(",")
+        for(i = 0; i < value.length; i++) {
+          item = value[i].split(";")
+          this.multi_add(item[0], item[1])
+        }
+
+      } else {
+
       if(value && value.split)
         var t = value.split(";");
       else
         var t = []
       this.element.data("value", t[0]);
       this.element.val(t[1]);
+
+      }
     },
     validate : function() {
       if(!this.source.data("edit-autocomplete-allow-nonexistent")) {
-        if(this.get())
+        let multi = this.source.data('edit-multiple')
+        let val = this.get()
+        if(val) {
+          if(multi) {
+            let i;
+            val = val.split(",")
+            for(i = 0; i < val.length; i++) {
+              if(!( parseInt(val[i]) >0))
+                return false
+            }
+            return true;
+          }
           return this.get() > 0;
+        }
       }
       return true;
     }
@@ -2098,10 +2612,569 @@ twentyc.editable.input.register(
   {
     apply : function(value) {
       this.source.html(PeeringDB.pretty_speed(this.get()));
+    },
+
+    export : function() {
+      return this.convert(this.get())
+    },
+
+    convert : function(value) {
+      if ( $.isNumeric(value) ){
+        return value
+      } else {
+      return this.reverse_pretty_speed(value)
+      }
+    },
+
+    validate : function() {
+      // Check if it's an integer
+      let value = this.element.val();
+      let suffix = value.slice(-1);
+
+      if(this.source.data('edit-required') != "yes" && !value)
+        return true;
+
+      if ( $.isNumeric(value) ){
+        return true
+      } else if ( $.isNumeric(value.slice(0,-1) ) && this.validate_suffix(suffix)) {
+        return true
+      }
+      return false
+    },
+    validation_message : function() {
+      return gettext("Needs to be an integer or a speed ending in M, G, or T") ///
+    },
+
+    validate_suffix: function(suffix) {
+      return ( suffix.toLowerCase() === "m" ||
+               suffix.toLowerCase() === "g" ||
+               suffix.toLowerCase() === "t" )
+    },
+
+    reverse_pretty_speed : function(value) {
+      // Given a pretty speed (string), output the integer speed
+
+      const conversion_factor = {
+        "m": 1,
+        "g": 1000,
+        "t": 1000000,
+      }
+
+      const num = parseFloat(value.slice(0, -1));
+      const unit = value.slice(-1).toLowerCase();
+      const multiplier = conversion_factor[unit]
+
+      // Always return the speed as an integer
+      return Math.round(num * multiplier)
+  },
+
+
+  },
+  "string"
+);
+
+twentyc.editable.input.register(
+  "unit_input",
+  {
+
+    unit_name : "unit",
+    units : [
+      {"id": "unit","name": "Unit"}
+    ],
+    selected_unit : "unit",
+
+    apply : function(value) {
+      this.source.text(this.format_units(value));
+    },
+
+    set : function(value) {
+      let value_to_set = value ? value : this.source.text().trim();
+      let m;
+      value_to_set = ""+value_to_set;
+      if ( m = value_to_set.match(/ ?([a-zA-Z ]+)$/)){
+        this.element.val(value_to_set.replace(/[a-zA-Z ]+$/,''));
+        this.element.data('unit_select').val(m[1]);
+        this.original_unit = m[1];
+      } else {
+        this.set_value(value_to_set)
+      }
+
+      this.element.data('unit_select').insertAfter(this.element);
+    },
+
+    set_value : function(value) {
+      this.element.val(value);
+    },
+
+
+    get_unit : function() {
+      return this.element.data('unit_select').val()
+    },
+
+    changed : function() {
+      let unit_changed = (this.element.data('unit_select').val() != this.original_unit);
+      let value_changed = (this.get() != this.original_value);
+      return (value_changed || unit_changed);
+    },
+
+    make : function() {
+      let input = $('<input class="unit" type="text"></input>')
+      let select = $(`<select name="${this.unit_name}" id="${this.unit_name}">`);
+
+      let selected = this.selected_unit;
+
+      $(this.units).each(function(){
+        let opt = $('<option>')
+        opt.val(this.id).text(this.name)
+        if(selected == this.name)
+          opt.prop('selected', true);
+        select.append(opt);
+      });
+
+      input.data('unit_select', select);
+
+      this.original_unit = select.val();
+
+
+      return input;
+    },
+
+    export : function() {
+      let unit = this.get_unit();
+      let value = this.get();
+      if(!value)
+        return null;
+      return this.convert(value, unit)
+    },
+
+    convert : function(value, unit) {
+      return value;
+    },
+
+    validate : function() {
+      // Check if it's an integer
+      let value = this.element.val();
+      if(!value)
+        return true;
+      if ( $.isNumeric(value) ){
+        return true
+      }
+      return false
+    },
+
+    formatted: function() {
+      return this.get()+this.element.data("unit_select").val()
+    },
+
+
+    format_units : function(value) {
+      return value;
+    },
+
+    reset : function(value) {
+      this.string_reset(value);
+      this.element.data("unit_select").val(this.selected_unit);
+    }
+
+  },
+  "string"
+);
+
+twentyc.editable.input.register(
+  "traffic_capacity",
+  {
+    unit_name : "traffic_capacity",
+    selected_unit : "Gbps",
+    units : [
+      {
+        "name": "Mbps",
+        "id": "Mbps"
+      },
+      {
+        "name": "Gbps",
+        "id": "Gbps"
+      },
+      {
+        "name": "Tbps",
+        "id": "Tbps"
+      }
+    ],
+    convert : function(value, unit) {
+      if ( unit == "Mbps"){
+        return parseInt(value)
+      } else if (unit == "Gbps"){
+        return parseInt(value * 1000);
+      } else if (unit == "Tbps"){
+        return parseInt(value * 1000000);
+      }
+    },
+
+    set_value : function(value) {
+
+      if(value >= 1000000) {
+        value = value / 1000000;
+        this.element.data('unit_select').val('Tbps')
+      } else if(value >= 1000) {
+        value = value / 1000;
+        this.element.data('unit_select').val('Gbps')
+      } else if(value) {
+        this.element.data('unit_select').val('Mbps')
+      }
+
+      this.element.val(value);
+
+    },
+
+    format_units: function(value) {
+      if(!value)
+        return "";
+
+      return value;
+
     }
   },
-  "number"
+  "unit_input"
 );
+
+twentyc.editable.input.register(
+  "spatial_distance",
+  {
+    unit_name : "spatial_distance",
+    selected_unit : "km",
+    units : [
+      {
+        "name": "km",
+        "id": "km"
+      },
+      {
+        "name": "miles",
+        "id": "miles"
+      }
+    ],
+    convert : function(value, unit) {
+      if ( unit == "km"){
+        return parseInt(value)
+      } else {
+        return parseInt(value / 0.621371);
+      }
+    },
+
+    format_units: function(value) {
+      if(!value)
+        return "";
+
+      return value;
+
+    }
+  },
+  "unit_input"
+);
+
+/**
+ * a select input that forces to user to change
+ * its value if specific conditions are met.
+ *
+ * @class data_quality_select
+ */
+
+twentyc.editable.input.register(
+  "data_quality_select",
+  {
+
+    /**
+     * returns an array of values that are deemed bad
+     * and should force the user to make a change
+     *
+     * this is specified in the data-edit-bad-values
+     * html attribute
+     *
+     * @method bad_values
+     * @returns {Array|null}
+     */
+
+    bad_values : function() {
+      let bad_values = this.source.data("edit-bad-values");
+      if(bad_values)
+        return bad_values.split(";");
+      return null;
+    },
+
+    /**
+     * Checks if the specified value is a bad value
+     * If no value is specified the current element
+     * input value is used.
+     *
+     * @method has_bad_value
+     * @param {String} value
+     * @returns {Bool}
+     */
+
+    has_bad_value : function(value) {
+
+      let bad_values = this.bad_values();
+
+      if(typeof(value) == "undefined") {
+        value = this.get();
+      }
+
+      if(bad_values) {
+        let i, bad_value;
+        for(i = 0; i < bad_values.length; i++) {
+          bad_value = bad_values[i]
+          if(value == bad_value) {
+            this.element.addClass("invalid-choice");
+            return true;
+          }
+        }
+      }
+
+      this.element.removeClass("invalid-choice");
+      return false;
+    },
+
+    /**
+     * We override the change method to always
+     * return true if the current value is a bad value
+     *
+     * This forces the user to change it before the
+     * save can be made.
+     */
+
+    changed : function() {
+      if(this.has_bad_value())
+        return true;
+      return this.select_changed()
+    },
+
+    /**
+     * When adding options to the select element we
+     * check each option to see if it contains a bad
+     * value and if it does, mark it as such
+     */
+
+    finalize_opt : function(opt) {
+      if(this.has_bad_value(opt.val())) {
+        opt.addClass("invalid-choice");
+      }
+      return opt;
+    },
+
+    /**
+     * For inputs that have a good value, we don't want
+     * the option for a bad value to still exist in the dropdown
+     *
+     * We override load to check this and remove the options
+     * if necessary.
+     *
+     * Inputs that have a bad value still need the bad value option
+     * available in order to communicate to the user the the value
+     * is bad and needs changing
+     */
+
+    load : function(data) {
+      let k, bad_values = this.source.data("edit-bad-values");
+      let value = this.source.data("edit-value")
+      if(!this.has_bad_value(value) && bad_values) {
+        bad_values = bad_values.split(";")
+        let _data = [];
+        for(k in data) {
+          if($.inArray(data[k].id, bad_values) == -1)
+            _data.push(data[k])
+        }
+        data = _data;
+      }
+
+
+      this.select_load(data);
+    },
+
+    /**
+     * We wire a change event so that when a bad value is
+     * changed to a good value by the user, the error
+     * css is removed from the element (done through the
+     * has_bad_value() method)
+     */
+
+    wire : function() {
+      this.has_bad_value();
+      this.element.on("change", () => {
+        this.has_bad_value(this.element.val());
+      })
+    }
+
+
+  },
+
+  "select"
+);
+
+/**
+ * input element for image file uploads
+ */
+
+twentyc.editable.input.register(
+  "image",
+  {
+    make : function() {
+
+      // main node holding all elements making up the upload UX
+      var node = $('<div class="file-upload">');
+
+      // element holding current image (if exists)
+      let current = $('<div class="current">');
+
+      // element holding upload image input
+      let upload = $('<div class="upload">');
+
+      // we need to copy the current image from the view-mode
+      // element so we can display it
+      let image = this.source.find('img').clone();
+
+      // file selection input
+      let input = $('<input type="file" style="display:inline">');
+
+      // loading shim
+      let loading = $('<div class="editable loading-shim single-field-shim">').hide();
+
+      // set file type accept
+      let accept = this.source.data("edit-accept");
+
+      // file upload button
+      var buttonUpload = $('<input type="button" class="btn btn-sm btn-default">').
+        val(gettext("Upload")).hide();
+
+      // button to clear image
+      var buttonClear = $('<input type="button" class="btn btn-sm btn-danger btn-clear">').
+        val(gettext("Remove")).hide();
+
+
+      // when selecting a file we want to show the upload button
+      // and clear any validation errors
+
+      input.on("change", () => {
+        this.close_note();
+        buttonUpload.show();
+      });
+
+      // if current image exists show the "Remove" button
+
+      if(this.source.data("edit-value")) {
+        buttonClear.show();
+      }
+
+      // clicking the upload button needs to close any validation
+      // errors and process the upload
+
+      buttonUpload.click(() => {
+        this.close_note();
+        this.upload();
+      });
+
+      // clicking the remove button needs to close any validation
+      // errors and process the file removal
+
+      buttonClear.click(() => {
+        this.close_note();
+        this.remove_file();
+      });
+
+      // assemble the UX nodes
+
+      current.append(image).append(buttonClear);
+      upload.append(input).append(buttonUpload);
+      node.append(current).append(upload).append(loading);
+
+      if(accept)
+        input.attr("accept", accept);
+
+      return node;
+    },
+
+    /**
+     * sends a DELETE request to data-edit-upload-path
+     * and will clear the current image from the UX
+     */
+
+    remove_file : function() {
+      let name = this.source.data("edit-name");
+      this.element.find('.loading-shim').show();
+      $.ajax({
+        url: this.source.data("edit-upload-path"),
+        method: 'delete',
+      }).done(() => {
+        // success clear current and preview images
+        this.source.find('img').hide();
+        this.element.find('img').hide();
+        // hide the "Remove" button
+        this.element.find('.btn-clear').hide();
+        this.element.find('.loading-shim').hide();
+      }).fail((r) => {
+        // failure - show validation error
+        this.show_validation_error(PeeringDB.handle_xhr_json_error(r, name))
+        this.element.find('.loading-shim').hide();
+      });
+    },
+
+    /**
+     * sends a POST file upload request to data-edit-upload-path
+     * and will update the current image in the UX
+     */
+
+    upload : function() {
+      var data = new FormData();
+      let name = this.source.data("edit-name");
+
+      this.element.find('.loading-shim').show();
+
+      // prepare file data
+      var file = this.element.find('input[type="file"]')[0].files[0];
+      data.append(name, file);
+
+      // upload file data to data-edit-upload-path via POST request
+      $.ajax({
+        url: this.source.data("edit-upload-path"),
+        method: 'post',
+        data: data,
+        contentType: false,
+        processData: false,
+      }).done((r) => {
+        // success - update current and preview image sources
+        // to new url and show the "Remove" button
+        this.source.find('img').attr('src', r["url"]).show();
+        this.element.find('img').attr('src', r["url"]).show();
+        this.element.find('.btn-clear').show();
+        this.element.find('.loading-shim').hide();
+      }).fail((r) => {
+
+        // failure - show validation error
+        if(r.status == 413) {
+          let maxSize = this.source.data("edit-max-size");
+          if(maxSize) {
+            maxSize = ", max. " + parseInt(maxSize / 1024) + "kb";
+          } else {
+            maxSize = "";
+          }
+          this.show_validation_error(gettext("File size too big")+maxSize);
+        } else {
+          this.show_validation_error(PeeringDB.handle_xhr_json_error(r, name));
+        }
+
+        this.element.find('.loading-shim').hide();
+      });
+    },
+
+    /**
+     * When resturing UX to view mode we just want to clone
+     * the preview image to the field
+     */
+
+    apply : function() {
+      this.source.empty().append(this.element.find('img').clone());
+    }
+  },
+  "string"
+)
+
 
 /*
  * set up input templates
@@ -2171,7 +3244,7 @@ twentyc.data.loaders.register(
 );
 
 $.urlParam = function(name){
-  var results = new RegExp('[\?&]' + name + '=([^&#]*)').exec(window.location.href);
+  var results = new RegExp('[?&]' + name + '=([^&#]*)').exec(window.location.href);
   if(!results)
     return 0;
   return results[1] || 0;
@@ -2182,6 +3255,7 @@ twentyc.data.loaders.assign("countries", "data");
 twentyc.data.loaders.assign("countries_b", "data");
 twentyc.data.loaders.assign("facilities", "data");
 twentyc.data.loaders.assign("sponsors", "data");
+twentyc.data.loaders.assign("my_organizations", "data");
 twentyc.data.loaders.assign("enum/regions", "data");
 twentyc.data.loaders.assign("enum/org_groups", "data");
 twentyc.data.loaders.assign("enum/media", "data");
@@ -2197,11 +3271,19 @@ twentyc.data.loaders.assign("enum/scopes_trunc", "data");
 twentyc.data.loaders.assign("enum/scopes_advs", "data");
 twentyc.data.loaders.assign("enum/protocols", "data");
 twentyc.data.loaders.assign("enum/poc_roles", "data");
+twentyc.data.loaders.assign("enum/poc_visibility", "data");
 twentyc.data.loaders.assign("enum/policy_general", "data");
 twentyc.data.loaders.assign("enum/policy_locations", "data");
 twentyc.data.loaders.assign("enum/policy_contracts", "data");
 twentyc.data.loaders.assign("enum/visibility", "data");
 twentyc.data.loaders.assign("enum/bool_choice_str", "data");
+twentyc.data.loaders.assign("enum/bool_choice_with_opt_out_str", "data");
+twentyc.data.loaders.assign("enum/service_level_types_trunc", "data");
+twentyc.data.loaders.assign("enum/service_level_types_advs", "data");
+twentyc.data.loaders.assign("enum/terms_types_trunc", "data");
+twentyc.data.loaders.assign("enum/terms_types_advs", "data");
+twentyc.data.loaders.assign("enum/property", "data");
+twentyc.data.loaders.assign("enum/available_voltage", "data");
 
 $(twentyc.data).on("load-enum/traffic", function(e, payload) {
   var r = {}, i = 0, data=payload.data;

@@ -145,6 +145,10 @@ a.btn {
   top: 0px;
 }
 
+a.btn.suggestion-accept {
+  margin-top: 16px;
+}
+
 h5 {
   font-weight: bold;
 }
@@ -534,7 +538,7 @@ div.view_title {
   font-size: 24px;
 /*  border-bottom: 3px #1c3f28 solid; */
   margin-top: 20px;
-  margin-bottom: 10px;
+  /* margin-bottom: 10px; */
 }
 
 div.view_title a.btn {
@@ -666,6 +670,14 @@ div.result_title {
   padding-bottom: 20px;
 }
 
+div.result_row div.highlight {
+  font-size: 11px;
+}
+
+div.result_row div.highlight em {
+  font-weight: bold;
+}
+
 div.result_row, table.result td {
   color: #1c3f28;
   vertical-align: top;
@@ -765,6 +777,11 @@ div.list > div.scrollable {
 /*  border-bottom: 3px #1c3f28 solid; */
 }
 
+/* Necessary to see validation error for phone number*/
+#list-poc.mode-edit {
+  padding-top: 15px;
+  margin-top: -15px;
+}
 
 div.list > div.row.header,
 table.result th {
@@ -937,6 +954,22 @@ textarea {
 }
 
 
+
+div.create-form div.editable.input-frame > input.unit,
+div.advanced-search-view div.editable.input-frame > input.unit,
+div.view div.editable.input-frame > input.unit {
+  width: 75% !important;
+  display: inline;
+}
+
+div.create-form div.editable > input.unit ~ select,
+div.advanced-search-view div.editable.input-frame > input.unit ~ select,
+div.view div.editable.input-frame > input.unit ~ select {
+  width: 25%;
+  display: inline;
+}
+
+
 .interactive,
 a[data-edit-action]:not(.btn) {
   cursor: pointer;
@@ -953,6 +986,12 @@ div.editable.mode-edit div.view_field {
   border-color: #9e1e1e;
 }
 
+
+.editable select.invalid-choice,
+.editable select option.invalid-choice {
+  color: #9e1e1e !important;
+}
+
 .input-note.validation-error + div[data-field] {
   border: #9e1e1e 1px solid;
   border-radius: 5px;
@@ -962,6 +1001,11 @@ div.editable.mode-edit div.view_field {
 .editable.input-note.validation-error {
   background-color: #9e1e1e;
   z-index: 10;
+  font-size: 14px;
+  right: 3px;
+  top: -24px;
+  left: auto;
+  padding: 5px;
 }
 
 
@@ -1072,6 +1116,11 @@ div.note.error > div.details {
   left: -15px;
 }
 
+.editable.loading-shim.single-field-shim {
+  left: 0px;
+  right: 0px;
+}
+
 .tab-pane .editable.loading-shim {
   background-color: #f1f1f1;
   opacity: 0.5;
@@ -1084,6 +1133,17 @@ input.editable.autocomplete.valid {
 }
 input.editable.autocomplete.invalid {
   color: #D71E1E;
+}
+
+div.autocomplete-choices {
+  padding: 5px;
+}
+
+div.alert.autocomplete-choice {
+  margin-bottom: 2px;
+  margin-top: 2px;
+  padding: 5px;
+  cursor: pointer;
 }
 
 span.yourlabs-autocomplete > span > div.sub {
@@ -1123,6 +1183,25 @@ span.yourlabs-autocomplete > span.hilight > div.sub {
 .editable a.btn-row-delete.next-to-input + div input {
   margin-left: 20px;
 }
+
+.editable div.file-upload div.upload,
+.editable div.file-upload div.current {
+  position: relative;
+  min-height: 30px;
+}
+
+.editable div.file-upload input[type="file"] {
+  margin-top: 5px;
+}
+
+.editable div.file-upload input[type="button"] {
+  position: absolute;
+  right: 0px;
+  top: 0px;
+  z-index: 10;
+}
+
+
 
 /*
  * api listing module
@@ -1538,5 +1617,21 @@ body[dir="rtl"] li > a {
   text-align: right;
 }
 
+span.stats {
+  display: inline-grid;
+  padding: 10px
+}
 
+a.stat-property, a.stat-value {
+  text-decoration: none;
+  color: #00203e;
+}
 
+a.stat-value {
+
+  font-weight: bold;
+}
+
+div.stats_row {
+  margin-top: 0;
+}

@@ -4,7 +4,6 @@ import os
 
 import django.conf.global_settings
 
-
 _DEFAULT_ARG = object()
 
 
@@ -85,7 +84,7 @@ def print_debug(*args, **kwargs):
 
 
 def get_locale_name(code):
-    """ Gets the readble name for a locale code. """
+    """Gets the readble name for a locale code."""
     language_map = dict(django.conf.global_settings.LANGUAGES)
 
     # check for exact match
@@ -97,52 +96,92 @@ def get_locale_name(code):
     return language_map.get(language, code)
 
 
-def set_default(name, value):
-    """ Sets the default value for the option if it's not already set. """
-    if name not in globals():
-        globals()[name] = value
-
-
 def set_from_env(name, default=_DEFAULT_ARG):
+    return _set_from_env(name, globals(), default)
+
+
+def _set_from_env(name, context, default):
     """
     Sets a global variable from a environment variable of the same name.
 
-    This is useful to leave the option unset and use Django's default (which may change).
+    This is useful to leave the option unset and use Django's default
+    (which may change).
     """
     if default is _DEFAULT_ARG and name not in os.environ:
         return
 
-    globals()[name] = os.environ.get(name, default)
+    context[name] = os.environ.get(name, default)
 
 
-def set_option(name, value):
-    """ Sets an option, first checking for env vars, then checking for value already set, then going to the default value if passed. """
+def set_option(name, value, envvar_type=None):
+    return _set_option(name, value, globals(), envvar_type)
+
+
+def _set_option(name, value, context, envvar_type=None):
+    """
+    Sets an option, first checking for env vars,
+    then checking for value already set,
+    then going to the default value if passed.
+    Environment variables are always strings, but
+    we try to coerce them to the correct type first by checking
+    the type of the default value provided. If the default
+    value is None, then we check the optional envvar_type arg.
+    """
+
+    # If value is in True or False we
+    # call set_bool to take advantage of
+    # its type checking for environment variables
+    if isinstance(value, bool):
+        return _set_bool(name, value, context)
+
+    if value is not None:
+        envvar_type = type(value)
+    else:
+        # If value is None, we'll use the provided envvar_type, if it is not None
+        if envvar_type is None:
+            raise ValueError(
+                f"If no default value is provided for the setting {name} the envvar_type argument must be set."
+            )
+
     if name in os.environ:
-        globals()[name] = os.environ.get(name)
-
-    if name not in globals():
-        globals()[name] = value
+        env_var = os.environ.get(name)
+        # Coerce type based on provided value
+        context[name] = envvar_type(env_var)
+    # If the environment variable isn't set
+    else:
+        _set_default(name, value, context)
 
 
 def set_bool(name, value):
-    """ Sets and option, first checking for env vars, then checking for value already set, then going to the default value if passed. """
+    return _set_bool(name, value, globals())
+
+
+def _set_bool(name, value, context):
+    """Sets and option, first checking for env vars, then checking for value already set, then going to the default value if passed."""
     if name in os.environ:
         envval = os.environ.get(name).lower()
         if envval in ["1", "true", "y", "yes"]:
-            globals()[name] = True
+            context[name] = True
         elif envval in ["0", "false", "n", "no"]:
-            globals()[name] = False
+            context[name] = False
         else:
-            raise ValueError(
-                "{} is a boolean, cannot match '{}'".format(name, os.environ[name])
-            )
+            raise ValueError(f"{name} is a boolean, cannot match '{os.environ[name]}'")
 
-    if name not in globals():
-        globals()[name] = value
+    _set_default(name, value, context)
+
+
+def set_default(name, value):
+    return _set_default(name, value, globals())
+
+
+def _set_default(name, value, context):
+    """Sets the default value for the option if it's not already set."""
+    if name not in context:
+        context[name] = value
 
 
 def try_include(filename):
-    """ Tries to include another file from the settings directory. """
+    """Tries to include another file from the settings directory."""
     print_debug(f"including {filename} {RELEASE_ENV}")
     try:
         with open(filename) as f:
@@ -152,7 +191,6 @@ def try_include(filename):
 
     except FileNotFoundError:
         print_debug(f"additional settings file '{filename}' was not found, skipping")
-        pass
 
 
 def read_file(name):
@@ -183,10 +221,13 @@ set_option(
     "PEERINGDB_VERSION", read_file(os.path.join(BASE_DIR, "etc/VERSION")).strip()
 )
 
-MIGRATION_MODULES={"django_peeringdb": None}
+MIGRATION_MODULES = {"django_peeringdb": None}
 
 # Contact email, from address, support email
 set_from_env("SERVER_EMAIL")
+
+# Error emails are dispatched to this address
+set_option("OPERATIONS_EMAIL", SERVER_EMAIL)
 
 set_from_env("SECRET_KEY")
 
@@ -200,6 +241,7 @@ set_option("DATABASE_PASSWORD", "")
 
 # Keys
 
+set_from_env("MELISSA_KEY")
 set_from_env("GOOGLE_GEOLOC_API_KEY")
 
 set_from_env("RDAP_LACNIC_APIKEY")
@@ -213,8 +255,20 @@ set_from_env("DESKPRO_URL")
 # Limits
 
 API_THROTTLE_ENABLED = True
-API_THROTTLE_RATE_ANON = "100/second"
-API_THROTTLE_RATE_USER = "100/second"
+set_option("API_THROTTLE_RATE_ANON", "100/second")
+set_option("API_THROTTLE_RATE_USER", "100/second")
+set_option("API_THROTTLE_RATE_FILTER_DISTANCE", "10/minute")
+set_option("API_THROTTLE_IXF_IMPORT", "1/minute")
+
+# spatial queries require user auth
+set_option("API_DISTANCE_FILTER_REQUIRE_AUTH", True)
+
+# spatial queries required verified user
+set_option("API_DISTANCE_FILTER_REQUIRE_VERIFIED", True)
+
+# specifies the expiry period of cached geo-coordinates
+# in seconds (default 30days)
+set_option("GEOCOORD_CACHE_EXPIRY", 86400 * 30)
 
 # maximum value to allow in network.info_prefixes4
 set_option("DATA_QUALITY_MAX_PREFIX_V4_LIMIT", 1000000)
@@ -243,18 +297,21 @@ set_option("DATA_QUALITY_MIN_SPEED", 100)
 # maximum value to allow for speed on an netixlan (currently 1Tbit)
 set_option("DATA_QUALITY_MAX_SPEED", 1000000)
 
-set_option("RATELIMITS", {
-    "request_login_POST": "4/m",
-    "request_translation": "2/m",
-    "resend_confirmation_mail": "2/m",
-    "view_request_ownership_POST": "3/m",
-    "view_request_ownership_GET": "3/m",
-    "view_affiliate_to_org_POST": "3/m",
-    "view_verify_POST": "2/m",
-    "view_username_retrieve_initiate": "2/m",
-    "view_import_ixlan_ixf_preview": "1/m",
-    "view_import_net_ixf_postmortem": "1/m",
-})
+set_option(
+    "RATELIMITS",
+    {
+        "request_login_POST": "4/m",
+        "request_translation": "2/m",
+        "resend_confirmation_mail": "2/m",
+        "view_request_ownership_POST": "3/m",
+        "view_request_ownership_GET": "3/m",
+        "view_affiliate_to_org_POST": "3/m",
+        "view_verify_POST": "2/m",
+        "view_username_retrieve_initiate": "2/m",
+        "view_import_ixlan_ixf_preview": "1/m",
+        "view_import_net_ixf_postmortem": "1/m",
+    },
+)
 
 # maximum number of affiliation requests a user can have pending
 set_option("MAX_USER_AFFILIATION_REQUESTS", 5)
@@ -275,7 +332,9 @@ SITE_ID = 1
 TIME_ZONE = "UTC"
 USE_TZ = True
 
-ADMINS = ("Support", SERVER_EMAIL)
+ADMINS = [
+    ("Operations", OPERATIONS_EMAIL),
+]
 MANAGERS = ADMINS
 
 MEDIA_ROOT = os.path.abspath(os.path.join(BASE_DIR, "media"))
@@ -305,7 +364,7 @@ DATABASES = {
         "NAME": DATABASE_NAME,
         "USER": DATABASE_USER,
         "PASSWORD": DATABASE_PASSWORD,
-       # "TEST": { "NAME": f"{DATABASE_NAME}_test" }
+        # "TEST": { "NAME": f"{DATABASE_NAME}_test" }
     },
 }
 
@@ -362,6 +421,7 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "haystack",
     "django_otp",
     "django_otp.plugins.otp_static",
     "django_otp.plugins.otp_totp",
@@ -381,7 +441,7 @@ INSTALLED_APPS = [
     "crispy_forms",
     "django_countries",
     "django_inet",
-    "django_namespace_perms",
+    "django_grainy",
     "django_peeringdb",
     "django_tables2",
     "oauth2_provider",
@@ -390,6 +450,12 @@ INSTALLED_APPS = [
     "captcha",
     "django_handleref",
 ]
+
+# allows us to regenerate the schema graph image for documentation
+# purposes in a dev environment
+if RELEASE_ENV == "dev":
+    INSTALLED_APPS.append("django_extensions")
+
 
 # List of finder classes that know how to find static files in
 # various locations.
@@ -462,6 +528,13 @@ PASSWORD_HASHERS = (
 ROOT_URLCONF = "mainsite.urls"
 CONN_MAX_AGE = 3600
 
+# starting with reversion 4.0 the reversion revision context
+# no longer opens an atomic transaction context, so we need
+# to ensure this ourselves for all the requests
+ATOMIC_REQUESTS = True
+
+DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
+
 
 # email vars should be already set from the release environment file
 # override here from env if set
@@ -514,7 +587,7 @@ CORS_ALLOW_METHODS = ["GET", "OPTIONS"]
 ## OAuth2
 
 # allows PeeringDB to use external OAuth2 sources
-set_option("OAUTH_ENABLED", False)
+set_bool("OAUTH_ENABLED", False)
 
 AUTHENTICATION_BACKENDS += (
     # for OAuth provider
@@ -525,6 +598,7 @@ AUTHENTICATION_BACKENDS += (
 
 MIDDLEWARE += (
     "peeringdb_server.maintenance.Middleware",
+    "peeringdb_server.middleware.CurrentRequestContext",
     "oauth2_provider.middleware.OAuth2TokenMiddleware",
 )
 
@@ -539,15 +613,14 @@ OAUTH2_PROVIDER = {
 }
 
 
-## NSP
+## grainy
 
-NSP_MODE = "crud"
-AUTHENTICATION_BACKENDS += ("django_namespace_perms.auth.backends.NSPBackend",)
+AUTHENTICATION_BACKENDS += ("django_grainy.backends.GrainyBackend",)
 
 
 ## Django Rest Framework
 
-INSTALLED_APPS += ("rest_framework", "rest_framework_swagger")
+INSTALLED_APPS += ("rest_framework", "rest_framework_swagger", "rest_framework_api_key")
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -559,10 +632,9 @@ REST_FRAMEWORK = {
     "DEFAULT_MODEL_SERIALIZER_CLASS": "rest_framework.serializers.HyperlinkedModelSerializer",
     # Use Django's standard `django.contrib.auth` permissions,
     # or allow read-only access for unauthenticated users.
-    # Handle rest of permissioning via django-namespace-perms
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly",
-        "django_namespace_perms.rest.BasePermission",
+        "django_grainy.rest.ModelViewSetPermissions",
     ],
     "DEFAULT_RENDERER_CLASSES": ("peeringdb_server.renderers.MetaJSONRenderer",),
     "DEFAULT_SCHEMA_CLASS": "peeringdb_server.api_schema.BaseSchema",
@@ -574,14 +646,23 @@ if API_THROTTLE_ENABLED:
             "DEFAULT_THROTTLE_CLASSES": (
                 "rest_framework.throttling.AnonRateThrottle",
                 "rest_framework.throttling.UserRateThrottle",
+                "peeringdb_server.rest_throttles.FilterDistanceThrottle",
             ),
             "DEFAULT_THROTTLE_RATES": {
                 "anon": API_THROTTLE_RATE_ANON,
                 "user": API_THROTTLE_RATE_USER,
+                "filter_distance": API_THROTTLE_RATE_FILTER_DISTANCE,
+                "ixf_import_request": API_THROTTLE_IXF_IMPORT,
             },
         }
     )
 
+## RDAP
+
+set_bool("RDAP_SELF_BOOTSTRAP", True)
+# put it under the main cache dir
+set_option("RDAP_BOOTSTRAP_DIR", os.path.join(BASE_DIR, "api-cache", "rdap-bootstrap"))
+set_bool("RDAP_IGNORE_RECURSE_ERRORS", True)
 
 ## PeeringDB
 
@@ -592,10 +673,22 @@ set_option("SPONSORSHIPS_EMAIL", SERVER_EMAIL)
 
 
 set_option("API_URL", "https://peeringdb.com/api")
-set_option("API_DEPTH_ROW_LIMIT",250)
-set_option("API_CACHE_ENABLED",  True)
+set_option("API_DEPTH_ROW_LIMIT", 250)
+set_option("API_CACHE_ENABLED", True)
 set_option("API_CACHE_ROOT", os.path.join(BASE_DIR, "api-cache"))
 set_option("API_CACHE_LOG", os.path.join(BASE_DIR, "var/log/api-cache.log"))
+
+
+# limit results for the standard search
+# (hitting enter on the main search bar)
+set_option("SEARCH_RESULTS_LIMIT", 1000)
+
+# limit results for the quick search
+# (autocomplete on the main search bar)
+set_option("SEARCH_RESULTS_AUTOCOMPLETE_LIMIT", 40)
+
+# boost org,net,fac,ix matches over secondary entites (1.0 == no boost)
+set_option("SEARCH_MAIN_ENTITY_BOOST", 1.5)
 
 
 set_option("BASE_URL", "http://localhost")
@@ -605,6 +698,21 @@ ACCOUNT_EMAIL_CONFIRMATION_ANONYMOUS_REDIRECT_URL = "/login"
 ACCOUNT_EMAIL_CONFIRMATION_AUTHENTICATED_REDIRECT_URL = "/verify"
 ACCOUNT_EMAIL_REQUIRED = True
 
+# haystack
+
+set_option("WHOOSH_INDEX_PATH", os.path.join(BASE_DIR, "api-cache", "whoosh-index"))
+set_option("WHOOSH_STORAGE", "file")
+HAYSTACK_CONNECTIONS = {
+    "default": {
+        "ENGINE": "haystack.backends.whoosh_backend.WhooshEngine",
+        "PATH": WHOOSH_INDEX_PATH,
+        "STORAGE": WHOOSH_STORAGE,
+        "BATCH_SIZE": 40000,
+    },
+}
+
+set_option("HAYSTACK_ITERATOR_LOAD_PER_QUERY", 20000)
+set_option("HAYSTACK_LIMIT_TO_REGISTERED_MODELS", False)
 
 # add user defined iso code for Kosovo
 COUNTRIES_OVERRIDE = {
@@ -685,6 +793,7 @@ set_option("TUTORIAL_MODE", False)
 
 #'guest' user group
 GUEST_GROUP_ID = 1
+set_option("GRAINY_ANONYMOUS_GROUP", "Guest")
 
 #'user' user group
 USER_GROUP_ID = 2
@@ -693,6 +802,18 @@ CSRF_FAILURE_VIEW = "peeringdb_server.views.view_http_error_csrf"
 
 RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify"
 
+# Organization logo limitations for public users
+# These limits dont necessarily apply for logos submitted through
+# /cp (django-admin)
+
+set_option("ORG_LOGO_ALLOWED_FILE_TYPE", ".jpg,.jpeg,.png")
+
+# max file size for public organization logo uploads (bytes)
+set_option("ORG_LOGO_MAX_SIZE", 50 * 1024)
+
+# max rendering height for the organization logo in net / org / fac / ix views
+# does NOT affect sponsorship logo rendering (pixels)
+set_option("ORG_LOGO_MAX_VIEW_HEIGHT", 75)
 
 # Set countries that don't use zipcodes
 set_option("NON_ZIPCODE_COUNTRIES", non_zipcode_countries())
@@ -742,6 +863,7 @@ if ENABLE_ALL_LANGUAGES:
 
     LANGUAGES = sorted(language_dict.items())
 
+
 # dynamic config starts here
 
 API_DOC_INCLUDES = {}
@@ -764,7 +886,6 @@ if DEBUG:
     # make all loggers use the console.
     for logger in LOGGING["loggers"]:
         LOGGING["loggers"][logger]["handlers"] = ["console"]
-
 
 if TUTORIAL_MODE:
     EMAIL_SUBJECT_PREFIX = "[PDB TUTORIAL] "

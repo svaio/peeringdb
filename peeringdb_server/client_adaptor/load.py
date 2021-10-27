@@ -1,7 +1,8 @@
-from django_peeringdb.client_adaptor.load import (
-    DJANGO_DB_FIELDS,
-    database_settings,
-)
+"""
+django-peeringdb backend loader (needed for pdb_load_data command)
+"""
+
+from django_peeringdb.client_adaptor.load import database_settings
 
 __backend = None
 

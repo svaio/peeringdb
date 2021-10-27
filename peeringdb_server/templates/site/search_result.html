@@ -14,8 +14,9 @@
       <div class="result_row">
         <a href="/{{'InternetExchange'|ref_tag}}/{{row.id}}">{{row.name}}</a>
         {% if row.sponsorship %}
-        <a href="/sponsors" class="sponsor {{ row.sponsorship|lower }}">{{ row.sponsorship }} sponsor</a>
+        <a href="/sponsors" class="sponsor {{ row.sponsorship.css }}">{{ row.sponsorship.label }} {% trans "sponsor" %}</a>
         {% endif %}
+        {% if row.sub_name %}<div class="highlight">{{ row.sub_name }}</div>{% endif %}
       </div>
       {% endfor %}
 
@@ -26,8 +27,9 @@
       <div class="result_row">
         <a href="/{{'Network'|ref_tag}}/{{row.id}}">{{row.name}}</a>
         {% if row.sponsorship %}
-        <a href="/sponsors" class="sponsor {{ row.sponsorship|lower }}">{{ row.sponsorship }} sponsor</a>
+        <a href="/sponsors" class="sponsor {{ row.sponsorship.css }}">{{ row.sponsorship.label }} {% trans "sponsor" %}</a>
         {% endif %}
+        {% if row.sub_name %}<div class="highlight">{{ row.sub_name }}</div>{% endif %}
       </div>
       {% endfor %}
 
@@ -39,8 +41,9 @@
       <div class="result_row">
         <a href="/{{'Facility'|ref_tag}}/{{row.id}}">{{row.name}}</a>
         {% if row.sponsorship %}
-        <a href="/sponsors" class="sponsor {{ row.sponsorship|lower }}">{{ row.sponsorship }} sponsor</a>
+        <a href="/sponsors" class="sponsor {{ row.sponsorship.css }}">{{ row.sponsorship.label }} {% trans "sponsor" %}</a>
         {% endif %}
+        {% if row.sub_name %}<div class="highlight">{{ row.sub_name }}</div>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -51,8 +54,9 @@
       <div class="result_row">
         <a href="/{{'Organization'|ref_tag}}/{{row.id}}">{{row.name}}</a>
         {% if row.sponsorship %}
-        <a href="/sponsors" class="sponsor {{ row.sponsorship|lower }}">{{ row.sponsorship }} sponsor</a>
+        <a href="/sponsors" class="sponsor {{ row.sponsorship.css }}">{{ row.sponsorship.label }} {% trans "sponsor" %}</a>
         {% endif %}
+        {% if row.sub_name %}<div class="highlight">{{ row.sub_name }}</div>{% endif %}
       </div>
       {% endfor %}
     </div>

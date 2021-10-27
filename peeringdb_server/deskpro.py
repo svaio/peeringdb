@@ -1,27 +1,41 @@
 """
-DeskPro API Client
+DeskPro API Client used to post and retrieve support ticket information
+from the deskpro API.
 """
 
-import uuid
-import re
-import requests
 import datetime
+import re
+import uuid
 
-from django.template import loader
-from django.conf import settings
 import django.urls
+import requests
+from django.conf import settings
+from django.template import loader
+from django.utils.translation import override
 
-from peeringdb_server.models import DeskProTicket
 from peeringdb_server.inet import RdapNotFoundError
+from peeringdb_server.models import DeskProTicket, is_suggested
+from peeringdb_server.permissions import get_org_key_from_request, get_user_from_request
 
 
 def ticket_queue(subject, body, user):
-    """ queue a deskpro ticket for creation """
+    """Queue a deskpro ticket for creation."""
 
-    ticket = DeskProTicket.objects.create(
+    DeskProTicket.objects.create(
         subject=f"{settings.EMAIL_SUBJECT_PREFIX}{subject}",
         body=body,
         user=user,
+    )
+
+
+def ticket_queue_email_only(subject, body, email):
+    """Queue a deskpro ticket for creation."""
+
+    DeskProTicket.objects.create(
+        subject=f"{settings.EMAIL_SUBJECT_PREFIX}{subject}",
+        body=body,
+        email=email,
+        user=None,
     )
 
 
@@ -31,9 +45,9 @@ class APIError(IOError):
         self.data = data
 
 
-def ticket_queue_asnauto_skipvq(user, org, net, rir_data):
+def ticket_queue_asnauto_skipvq(request, org, net, rir_data):
     """
-    queue deskro ticket creation for asn automation action: skip vq
+    Queue deskro ticket creation for asn automation action: skip vq.
     """
 
     if isinstance(net, dict):
@@ -46,18 +60,33 @@ def ticket_queue_asnauto_skipvq(user, org, net, rir_data):
     else:
         org_name = org.name
 
-    ticket_queue(
-        f"[ASNAUTO] Network '{net_name}' approved for existing Org '{org_name}'",
-        loader.get_template("email/notify-pdb-admin-asnauto-skipvq.txt").render(
-            {"user": user, "org": org, "net": net, "rir_data": rir_data}
-        ),
-        user,
-    )
+    user = get_user_from_request(request)
+    if user:
+        ticket_queue(
+            f"[ASNAUTO] Network '{net_name}' approved for existing Org '{org_name}'",
+            loader.get_template("email/notify-pdb-admin-asnauto-skipvq.txt").render(
+                {"user": user, "org": org, "net": net, "rir_data": rir_data}
+            ),
+            user,
+        )
+        return
+
+    org_key = get_org_key_from_request(request)
+    if org_key:
+        ticket_queue_email_only(
+            f"[ASNAUTO] Network '{net_name}' approved for existing Org '{org_name}'",
+            loader.get_template(
+                "email/notify-pdb-admin-asnauto-skipvq-org-key.txt"
+            ).render(
+                {"org_key": org_key, "org": org, "net": net, "rir_data": rir_data}
+            ),
+            org_key.email,
+        )
 
 
 def ticket_queue_asnauto_affil(user, org, net, rir_data):
     """
-    queue deskro ticket creation for asn automation action: affil
+    Queue deskro ticket creation for asn automation action: affil.
     """
 
     ticket_queue(
@@ -74,7 +103,7 @@ def ticket_queue_asnauto_create(
     user, org, net, rir_data, asn, org_created=False, net_created=False
 ):
     """
-    queue deskro ticket creation for asn automation action: create
+    Queue deskro ticket creation for asn automation action: create.
     """
 
     subject = []
@@ -107,7 +136,53 @@ def ticket_queue_asnauto_create(
     )
 
 
-def ticket_queue_rdap_error(user, asn, error):
+def ticket_queue_vqi_notify(instance, rdap):
+    item = instance.item
+    user = instance.user
+    org_key = instance.org_key
+
+    with override("en"):
+        entity_type_name = str(instance.content_type)
+
+    title = f"{entity_type_name} - {item}"
+
+    if is_suggested(item):
+        title = f"[SUGGEST] {title}"
+
+    if user:
+        ticket_queue(
+            title,
+            loader.get_template("email/notify-pdb-admin-vq.txt").render(
+                {
+                    "entity_type_name": entity_type_name,
+                    "suggested": is_suggested(item),
+                    "item": item,
+                    "user": user,
+                    "rdap": rdap,
+                    "edit_url": f"{settings.BASE_URL}{instance.item_admin_url}",
+                }
+            ),
+            user,
+        )
+
+    elif org_key:
+        ticket_queue_email_only(
+            title,
+            loader.get_template("email/notify-pdb-admin-vq-org-key.txt").render(
+                {
+                    "entity_type_name": entity_type_name,
+                    "suggested": is_suggested(item),
+                    "item": item,
+                    "org_key": org_key,
+                    "rdap": rdap,
+                    "edit_url": f"{settings.BASE_URL}{instance.item_admin_url}",
+                }
+            ),
+            org_key.email,
+        )
+
+
+def ticket_queue_rdap_error(request, asn, error):
     if isinstance(error, RdapNotFoundError):
         return
     error_message = f"{error}"
@@ -115,14 +190,29 @@ def ticket_queue_rdap_error(user, asn, error):
     if re.match("(.+) returned 400", error_message):
         return
 
-    subject = f"[RDAP_ERR] {user.username} - AS{asn}"
-    ticket_queue(
-        subject,
-        loader.get_template("email/notify-pdb-admin-rdap-error.txt").render(
-            {"user": user, "asn": asn, "error_details": error_message}
-        ),
-        user,
-    )
+    user = get_user_from_request(request)
+
+    if user:
+        subject = f"[RDAP_ERR] {user.username} - AS{asn}"
+        ticket_queue(
+            subject,
+            loader.get_template("email/notify-pdb-admin-rdap-error.txt").render(
+                {"user": user, "asn": asn, "error_details": error_message}
+            ),
+            user,
+        )
+        return
+
+    org_key = get_org_key_from_request(request)
+    if org_key:
+        subject = f"[RDAP_ERR] {org_key.email} - AS{asn}"
+        ticket_queue_email_only(
+            subject,
+            loader.get_template("email/notify-pdb-admin-rdap-error-org-key.txt").render(
+                {"org_key": org_key, "asn": asn, "error_details": error_message}
+            ),
+            org_key.email,
+        )
 
 
 class APIClient:
@@ -135,7 +225,12 @@ class APIClient:
         return {"Authorization": f"key {self.key}"}
 
     def parse_response(self, response, many=False):
-        r_json = response.json()
+        try:
+            r_json = response.json()
+        except Exception:
+            print(response.content)
+            raise
+
         if "status" in r_json:
             if r_json["status"] >= 400:
                 raise APIError(r_json["message"], r_json)
@@ -162,36 +257,92 @@ class APIClient:
         )
         return self.parse_response(response)
 
-    def require_person(self, user):
-        person = self.get("people", {"primary_email": user.email})
+    def update(self, endpoint, param):
+        response = requests.put(
+            f"{self.url}/{endpoint}", json=param, headers=self.auth_headers
+        )
+        if response.status_code == 204:
+            return {}
+        return self.parse_response(response)
+
+    def require_person(self, email, user=None):
+
+        """
+        Get or create a deskpro person using the deskpro API.
+
+        At minimum, this needs to be passed to an email
+        address.
+
+        If a peeringdb user instance is also specified, it will
+        be used to fill in name information.
+
+        Arguments:
+
+        - email(`str`)
+        - user(`User`)
+        """
+
+        person = self.get("people", {"primary_email": email})
+
         if not person:
-            person = self.create(
-                "people",
-                {
-                    "primary_email": user.email,
-                    "first_name": user.first_name,
-                    "last_name": user.last_name,
-                    "name": user.full_name,
-                },
-            )
+
+            payload = {"primary_email": email}
+
+            if user:
+                payload.update(
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    name=user.full_name,
+                )
+            else:
+                payload.update(name=email)
+
+            person = self.create("people", payload)
 
         return person
 
     def create_ticket(self, ticket):
-        person = self.require_person(ticket.user)
+
+        """
+        Create a deskpro ticket using the deskpro API.
+
+        Arguments:
+
+        - ticket (`DeskProTicket`)
+        """
+
+        if ticket.user:
+            person = self.require_person(ticket.user.email, user=ticket.user)
+        elif ticket.email:
+            person = self.require_person(ticket.email)
+        else:
+            raise ValueError(
+                "Either user or email need to be specified on the DeskProTicket instance"
+            )
 
         if not ticket.deskpro_id:
+
+            cc = []
+
+            for _cc in ticket.cc_set.all():
+                cc.append(_cc.email)
+
             ticket_response = self.create(
                 "tickets",
                 {
                     "subject": ticket.subject,
                     "person": {"id": person["id"]},
                     "status": "awaiting_agent",
+                    "cc": cc,
                 },
             )
 
             ticket.deskpro_ref = ticket_response["ref"]
             ticket.deskpro_id = ticket_response["id"]
+
+        else:
+
+            self.reopen_ticket(ticket)
 
         self.create(
             f"tickets/{ticket.deskpro_id}/messages",
@@ -202,17 +353,40 @@ class APIClient:
             },
         )
 
+    def reopen_ticket(self, ticket):
+
+        """
+        Check the current status of existing tickets
+        on deskpro's side.
+
+        If the ticket has already been resolved, set it
+        back to awaiting_agent before posting a new message to
+        it (see #920).
+        """
+
+        if not ticket.deskpro_id:
+            return
+
+        endpoint = f"tickets/{ticket.deskpro_id}"
+        ticket_data = self.get(endpoint, param={})
+
+        if ticket_data and ticket_data.get("ticket_status") == "resolved":
+            print("ticket resolved already")
+            self.update(endpoint, {"status": "awaiting_agent"})
+            print("Re-opened ticket (set to awaiting_agent)", ticket.deskpro_id)
+
 
 class MockAPIClient(APIClient):
 
     """
-    A mock api client for the deskpro API
+    A mock API client for the deskpro API.
 
     The IX-F importer uses this when
     IXF_SEND_TICKETS=False
     """
 
     def __init__(self, *args, **kwargs):
+        super().__init__("", "")
         self.ticket_count = 0
 
     def get(self, endpoint, param):
@@ -233,14 +407,15 @@ class MockAPIClient(APIClient):
 class FailingMockAPIClient(MockAPIClient):
 
     """
-    A mock api client for the deskpro API
-    that returns an error on post
+    A mock API client for the deskpro API
+    that returns an error on post.
 
-    We use this in our tests, for example
+    Use in tests, for example
     with issue 856.
     """
 
     def __init__(self, *args, **kwargs):
+        super().__init__("", "")
         self.ticket_count = 0
 
     def get(self, endpoint, param):
@@ -256,10 +431,10 @@ class FailingMockAPIClient(MockAPIClient):
         )
 
 
-def ticket_queue_deletion_prevented(user, instance):
+def ticket_queue_deletion_prevented(request, instance):
     """
-    queue deskpro ticket to notify about the prevented
-    deletion of an object #696
+    Queue deskpro ticket to notify the prevented
+    deletion of an object #696.
     """
 
     subject = (
@@ -290,19 +465,43 @@ def ticket_queue_deletion_prevented(user, instance):
 
     model_name = instance.__class__.__name__.lower()
 
-    # create ticket
+    # Create ticket if a request was made by user or UserAPIKey
+    user = get_user_from_request(request)
+    if user:
+        ticket_queue(
+            subject,
+            loader.get_template("email/notify-pdb-admin-deletion-prevented.txt").render(
+                {
+                    "user": user,
+                    "instance": instance,
+                    "admin_url": settings.BASE_URL
+                    + django.urls.reverse(
+                        f"admin:peeringdb_server_{model_name}_change",
+                        args=(instance.id,),
+                    ),
+                }
+            ),
+            user,
+        )
+        return
 
-    ticket_queue(
-        subject,
-        loader.get_template("email/notify-pdb-admin-deletion-prevented.txt").render(
-            {
-                "user": user,
-                "instance": instance,
-                "admin_url": settings.BASE_URL
-                + django.urls.reverse(
-                    f"admin:peeringdb_server_{model_name}_change", args=(instance.id,)
-                ),
-            }
-        ),
-        user,
-    )
+    # Create ticket if request was made by OrgAPIKey
+    org_key = get_org_key_from_request(request)
+    if org_key:
+        ticket_queue_email_only(
+            subject,
+            loader.get_template(
+                "email/notify-pdb-admin-deletion-prevented-org-key.txt"
+            ).render(
+                {
+                    "org_key": org_key,
+                    "instance": instance,
+                    "admin_url": settings.BASE_URL
+                    + django.urls.reverse(
+                        f"admin:peeringdb_server_{model_name}_change",
+                        args=(instance.id,),
+                    ),
+                }
+            ),
+            org_key.email,
+        )

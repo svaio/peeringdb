@@ -1,9 +1,11 @@
+"""
+Fix object status in reversion archived data (#558).
+"""
 import json
 
-from django.core.management.base import BaseCommand
-from django.core import serializers
-
 import reversion
+from django.core.management.base import BaseCommand
+from django.db import transaction
 
 from peeringdb_server.models import REFTAG_MAP
 
@@ -80,6 +82,7 @@ class Command(BaseCommand):
         self.log(f"{fixed} revisions fixed for {model.__name__}")
 
     @reversion.create_revision()
+    @transaction.atomic()
     def process_entity(self, entity, most_recent_version):
         # force revision date to be same as that of the most recent version
         # so status change is archived at the correct date

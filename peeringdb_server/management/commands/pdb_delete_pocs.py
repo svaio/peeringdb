@@ -1,9 +1,12 @@
+"""
+Hard delete old soft-deleted network contract instances.
+"""
+
 from datetime import timedelta
 
-from django.core.management.base import BaseCommand
 from django.conf import settings
+from django.core.management.base import BaseCommand
 from django.utils import timezone
-
 from reversion.models import Version
 
 from peeringdb_server.models import NetworkContact

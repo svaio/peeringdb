@@ -1,31 +1,40 @@
+"""
+Autocomplete views.
+
+Handle most autocomplete functionality found in peeringdb.
+
+Note: Quick search behavior is specified in search.py
+"""
+
 import json
 
-from django.db.models import Q
-from django import http
-from django.utils import html
-from django.core.exceptions import ObjectDoesNotExist
-from reversion.models import Version
-from grappelli.views.related import AutocompleteLookup as GrappelliAutocomplete
 from dal import autocomplete
-from peeringdb_server.models import (
-    InternetExchange,
-    Facility,
-    NetworkFacility,
-    InternetExchangeFacility,
-    Organization,
-    IXLan,
-    CommandLineTool,
-    REFTAG_MAP,
-)
+from django import http
+from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
+from django.utils import html
+from grappelli.views.related import AutocompleteLookup as GrappelliAutocomplete
+from reversion.models import Version
 
 from peeringdb_server.admin_commandline_tools import TOOL_MAP
+from peeringdb_server.models import (
+    REFTAG_MAP,
+    CommandLineTool,
+    Facility,
+    InternetExchange,
+    InternetExchangeFacility,
+    IXLan,
+    Network,
+    NetworkFacility,
+    Organization,
+)
 
 
 class GrappelliHandlerefAutocomplete(GrappelliAutocomplete):
     """
-    makes sure that the auto-complete fields managed
+    Make sure that the auto-complete fields managed
     by grappelli in django admin exclude soft-deleted
-    objects
+    objects.
     """
 
     def get_queryset(self):
@@ -42,7 +51,7 @@ class AutocompleteHTMLResponse(autocomplete.Select2QuerySetView):
         return False
 
     def render_to_response(self, context):
-        q = self.request.GET.get("q", None)
+        self.request.GET.get("q", None)
         return http.HttpResponse(
             "".join([i.get("text") for i in self.get_results(context)]),
             content_type="text/html",
@@ -94,6 +103,24 @@ class FacilityAutocomplete(AutocompleteHTMLResponse):
         return (
             '<span data-value="%d"><div class="main">%s</div> <div class="sub">%s</div></span>'
             % (item.pk, html.escape(item.name), html.escape(item.address1))
+        )
+
+
+class NetworkAutocomplete(AutocompleteHTMLResponse):
+    def get_queryset(self):
+        qs = Network.objects.filter(status="ok")
+        if self.q:
+            qs = qs.filter(
+                Q(name__icontains=self.q)
+                | Q(aka__icontains=self.q)
+                | Q(asn__iexact=self.q)
+            )
+        qs = qs.order_by("name")
+        return qs
+
+    def get_result_label(self, item):
+        return '<span data-value="{}"><div class="main">{}</div> <div class="sub">AS{}</div></span>'.format(
+            item.pk, html.escape(item.name), html.escape(item.asn)
         )
 
 
@@ -158,7 +185,7 @@ class IXLanAutocomplete(AutocompleteHTMLResponse):
 class DeletedVersionAutocomplete(autocomplete.Select2QuerySetView):
     """
     Autocomplete that will show reversion versions where an object
-    was set to deleted
+    was set to deleted.
     """
 
     def get_queryset(self):
@@ -214,7 +241,7 @@ class DeletedVersionAutocomplete(autocomplete.Select2QuerySetView):
 
 class CommandLineToolHistoryAutocomplete(autocomplete.Select2QuerySetView):
     """
-    Autocomplete for command line tools that were ran via the admin ui
+    Autocomplete for command line tools that were run via the admin ui.
     """
 
     tool = ""

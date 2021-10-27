@@ -1,16 +1,24 @@
-import io
 import datetime
+import io
+
 import pytest
-
-from .util import ClientCase, Group, override_group_id
-
-from django.core.management import call_command
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 
-from peeringdb_server.models import REFTAG_MAP, UTC, Network
-from peeringdb_server.stats import stats
+from peeringdb_server.models import (
+    REFTAG_MAP,
+    UTC,
+    Facility,
+    InternetExchange,
+    InternetExchangeFacility,
+    Network,
+    NetworkFacility,
+    NetworkIXLan,
+)
+from peeringdb_server.stats import get_fac_stats, get_ix_stats, stats
 
+from .util import ClientCase, Group, override_group_id
 
 DATE_PAST = datetime.datetime(year=2019, month=11, day=1)
 
@@ -38,7 +46,9 @@ def setup_data():
 
     # move users 4, 5, 6 to the past
 
-    User.objects.filter(username__in=["user_4", "user_5", "user_6"]).update(created=date_past)
+    User.objects.filter(username__in=["user_4", "user_5", "user_6"]).update(
+        created=date_past
+    )
 
     # verify all users except 1 and 4
 
@@ -86,3 +96,78 @@ def test_global_stats(db, data_stats_global):
 
     global_stats = stats()
     assert global_stats == data_stats_global.expected
+
+
+@pytest.mark.django_db
+def test_ix_fac_stats(db, data_stats_global):
+    setup_data()
+
+    exchange = InternetExchange.objects.first()
+
+    netixlan = (
+        NetworkIXLan.handleref.undeleted()
+        .select_related("network", "ixlan")
+        .order_by("network__name")
+        .filter(ixlan__ix=exchange)
+    )
+
+    ixlan = exchange.ixlan
+
+    ix_stats = get_ix_stats(netixlan, ixlan)
+
+    ipv6_percentage = 0
+
+    total_speed = 0
+
+    for n in netixlan.filter(status="ok", ixlan=ixlan):
+        total_speed += n.speed
+
+    try:
+        ipv6_percentage = int(
+            (
+                netixlan.filter(status="ok", ixlan=ixlan, ipaddr6__isnull=False).count()
+                / netixlan.filter(ixlan=ixlan, status="ok").count()
+            )
+            * 100
+        )
+    except ZeroDivisionError:
+        pass
+
+    assert (
+        ix_stats["peer_count"]
+        == netixlan.values("network").distinct().filter(status="ok").count()
+    )
+    assert (
+        ix_stats["connection_count"]
+        == netixlan.filter(ixlan=ixlan, status="ok").count()
+    )
+    assert ix_stats["open_peer_count"] == (
+        netixlan.values("network")
+        .distinct()
+        .filter(network__policy_general="Open", status="ok")
+        .count()
+    )
+    assert ix_stats["ipv6_percentage"] == ipv6_percentage
+    assert ix_stats["total_speed"] == total_speed
+
+    facility = Facility.objects.first()
+
+    ixfac = (
+        InternetExchangeFacility.handleref.undeleted()
+        .filter(facility=facility)
+        .select_related("ix")
+        .order_by("ix__name")
+        .all()
+    )
+
+    netfac = (
+        NetworkFacility.handleref.undeleted()
+        .filter(facility=facility)
+        .select_related("network")
+        .order_by("network__name")
+    )
+
+    fac_stats = get_fac_stats(netfac, ixfac)
+
+    assert fac_stats["networks"] == netfac.filter(status="ok").count()
+    assert fac_stats["ix"] == ixfac.filter(status="ok").count()

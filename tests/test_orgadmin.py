@@ -1,15 +1,15 @@
-import pytest
 import json
 
-from django.test import Client, TestCase, RequestFactory
-from django.contrib.auth.models import Group
+import pytest
 from django.conf import settings
+from django.contrib.auth.models import Group
+from django.test import Client, RequestFactory, TestCase
+from grainy.const import *
 
 import peeringdb_server.models as models
 import peeringdb_server.org_admin_views as org_admin
 import peeringdb_server.views as views
-from django_namespace_perms.constants import PERM_CREATE, PERM_DELETE
-from .util import override_group_id
+from tests.util import override_group_id
 
 
 class OrgAdminTests(TestCase):
@@ -457,9 +457,9 @@ class OrgAdminTests(TestCase):
 
         # prepare source dict with nsp namespaces
         source = {
-            self.net.nsp_namespace: 0x01,
-            self.ix.nsp_namespace: 0x01,
-            self.fac.nsp_namespace: 0x01,
+            self.net.grainy_namespace: 0x01,
+            self.ix.grainy_namespace: 0x01,
+            self.fac.grainy_namespace: 0x01,
         }
 
         # extract ids
@@ -484,9 +484,9 @@ class OrgAdminTests(TestCase):
 
         # prepare source dict with nsp namespaces
         source = {
-            self.net.nsp_namespace_from_id(self.org.id, "*").strip(".*"): 0x01,
-            self.fac.nsp_namespace_from_id(self.org.id, "*").strip(".*"): 0x03,
-            self.ix.nsp_namespace_from_id(self.org.id, "*").strip(".*"): 0x01,
+            self.net.Grainy.namespace_instance("*", org=self.net.org).strip(".*"): 0x01,
+            self.fac.Grainy.namespace_instance("*", org=self.net.org).strip(".*"): 0x03,
+            self.ix.Grainy.namespace_instance("*", org=self.net.org).strip(".*"): 0x01,
         }
 
         # extract ids
@@ -563,7 +563,8 @@ class OrgAdminTests(TestCase):
 
         with override_group_id():
             request = self.factory.post(
-                "/org-admin/uoar/approve?org_id=%d" % self.org.id, data={"id": uoar_b.id}
+                "/org-admin/uoar/approve?org_id=%d" % self.org.id,
+                data={"id": uoar_b.id},
             )
         request._dont_enforce_csrf_checks = True
         request.user = self.org_admin
@@ -641,6 +642,65 @@ class OrgAdminTests(TestCase):
         self.assertEqual(json.loads(resp.content), {})
 
         uoar_b.delete()
+
+    def test_uoar_double_affiliation_request(self):
+        """
+        Test that making a second affiliation request
+        does nothing for normal members bc
+        a signal intercepts the request (issue 930)
+        """
+        self.assertTrue(self.user_a.is_org_member(self.org))
+        self.assertTrue(self.user_a not in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.user_a in self.org.usergroup.user_set.all())
+
+        models.UserOrgAffiliationRequest.objects.create(
+            user=self.user_a, org=self.org, status="pending"
+        )
+        self.assertTrue(self.user_a not in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.user_a in self.org.usergroup.user_set.all())
+        self.assertEqual(models.UserOrgAffiliationRequest.objects.count(), 0)
+
+    def test_uoar_double_deny_admin(self):
+        """
+        Test that making and denying a second affiliation request
+        does nothing for admin members (issue 930)
+        """
+        self.assertTrue(self.org_admin.is_org_admin(self.org))
+        self.assertTrue(self.org_admin in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.org_admin not in self.org.usergroup.user_set.all())
+
+        uoar_admin = models.UserOrgAffiliationRequest.objects.create(
+            user=self.org_admin, asn=1, status="pending"
+        )
+        """
+        Denying an additional request should not change the affiliation
+        and should delete the request
+        """
+        uoar_admin.deny()
+        self.assertTrue(self.org_admin in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.org_admin not in self.org.usergroup.user_set.all())
+        self.assertEqual(models.UserOrgAffiliationRequest.objects.count(), 0)
+
+    def test_uoar_double_approve_admin(self):
+        """
+        Test that making and approving a second affiliation request
+        does nothing for admin members (issue 930)
+        """
+        self.assertTrue(self.org_admin.is_org_admin(self.org))
+        self.assertTrue(self.org_admin in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.org_admin not in self.org.usergroup.user_set.all())
+
+        uoar_admin = models.UserOrgAffiliationRequest.objects.create(
+            user=self.org_admin, asn=1, status="pending"
+        )
+        """
+        Approving an additional request should not change the affiliation
+        and should delete the request
+        """
+        uoar_admin.approve()
+        self.assertTrue(self.org_admin in self.org.admin_usergroup.user_set.all())
+        self.assertTrue(self.org_admin not in self.org.usergroup.user_set.all())
+        self.assertEqual(models.UserOrgAffiliationRequest.objects.count(), 0)
 
     def test_uoar_cancel_on_delete(self):
         """

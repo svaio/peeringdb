@@ -1,8 +1,14 @@
-from django.core.management.base import BaseCommand, CommandError
+"""
+Replace a value in a field across several entities.
+"""
+
+import re
 
 import reversion
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+
 import peeringdb_server.models as pdbm
-import re
 
 
 class Command(BaseCommand):
@@ -30,6 +36,7 @@ class Command(BaseCommand):
             print(f"[{self.target}] {msg}")
 
     @reversion.create_revision()
+    @transaction.atomic()
     def handle(self, *args, **options):
 
         self.commit = options.get("commit", False)
@@ -47,7 +54,7 @@ class Command(BaseCommand):
         try:
             search_field, search_value = self.search.split(":")
             ref_tag, search_field = search_field.split(".")
-        except:
+        except Exception:
             raise CommandError(
                 "Format for --search: <ref_tag>.<field_name>:<search_value>"
             )
@@ -57,7 +64,7 @@ class Command(BaseCommand):
             replace_field = m.group(1)
             replace_search_value = m.group(2)
             replace_value = m.group(3)
-        except:
+        except Exception:
             raise CommandError(
                 "Format for --replace: <field_name>:<search_value>:<replacement_value>"
             )
@@ -77,7 +84,7 @@ class Command(BaseCommand):
 
         for e in q:
             val = getattr(e, search_field)
-            if re.search(search_value, val) != None:
+            if re.search(search_value, val) is not None:
                 t_val = getattr(e, replace_field)
                 r_val = None
                 if replace_search_value == "*":

@@ -1,20 +1,20 @@
 """
-This holds JSON views for various data sets,
+This holds JSON views for various data sets.
 
-Mostly these are needed for filling form-selects for editable
-mode
+These are needed for filling form-selects for editable
+mode in UX.
 """
-import datetime
 
+import django_countries
+import django_peeringdb.const as const
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
-import django_countries
-from . import models
-import django_peeringdb.const as const
 from django.utils import translation
 from django.utils.translation import ugettext_lazy as _
 
-from peeringdb_server.models import Organization, Network, Sponsorship
+from peeringdb_server.models import Network, Organization, Sponsorship
+
+from . import models
 
 # def _(x):
 #    return x
@@ -27,6 +27,8 @@ const.TRAFFIC = [(k, i) for k, i in const.TRAFFIC if k != "100+ Gbps"]
 const.RATIOS_TRUNC = const.RATIOS[1:]
 const.SCOPES_TRUNC = const.SCOPES[1:]
 const.NET_TYPES_TRUNC = const.NET_TYPES[1:]
+const.SERVICE_LEVEL_TYPES_TRUNC = const.SERVICE_LEVEL_TYPES[1:]
+const.TERMS_TYPES_TRUNC = const.TERMS_TYPES[1:]
 
 # create enums without duplicate "Not Disclosed" choices
 # but with the one Not Disclosed choice combining both
@@ -41,18 +43,41 @@ const.NET_TYPES_ADVS[0] = (
     ",%s" % const.NET_TYPES_ADVS[0][0],
     const.NET_TYPES_ADVS[0][1],
 )
+const.SERVICE_LEVEL_TYPES_ADVS = list(const.SERVICE_LEVEL_TYPES[1:])
+const.SERVICE_LEVEL_TYPES_ADVS[0] = (
+    f",{const.SERVICE_LEVEL_TYPES_ADVS[0][0]}",
+    const.SERVICE_LEVEL_TYPES_ADVS[0][1],
+)
+const.TERMS_TYPES_ADVS = list(const.TERMS_TYPES[1:])
+const.TERMS_TYPES_ADVS[0] = (
+    f",{const.TERMS_TYPES_ADVS[0][0]}",
+    const.TERMS_TYPES_ADVS[0][1],
+)
+
 
 const.ORG_GROUPS = (("member", "member"), ("admin", "admin"))
 
 const.POC_ROLES = sorted(const.POC_ROLES, key=lambda x: x[1])
+const.POC_VISIBILITY = [r for r in const.VISIBILITY if r[0] != "Private"]
 
 BOOL_CHOICE = ((False, _("No")), (True, _("Yes")))
 const.BOOL_CHOICE_STR = (("False", _("No")), ("True", _("Yes")))
 
+BOOL_CHOICE_WITH_OPT_OUT = (
+    (None, _("Not Disclosed")),
+    (False, _("No")),
+    (True, _("Yes")),
+)
+const.BOOL_CHOICE_WITH_OPT_OUT_STR = (
+    ("", _("Not Disclosed")),
+    ("False", _("No")),
+    ("True", _("Yes")),
+)
+
 
 def countries_w_blank(request):
     """
-    Returns all valid countries and their country codes with a blank field
+    Return all valid countries and their country codes with a blank field.
     """
 
     return JsonResponse(
@@ -68,7 +93,7 @@ def countries_w_blank(request):
 
 def countries(request):
     """
-    Returns all valid countries and their country codes
+    Return all valid countries and their country codes.
     """
 
     return JsonResponse(
@@ -83,12 +108,16 @@ def countries(request):
 
 def sponsorships(request):
     """
-    Returns all sponsorships
+    Return all sponsorships.
     """
 
     sponsors = {}
     for org, sponsorship in Sponsorship.active_by_org():
-        sponsors[org.id] = {"id": org.id, "name": sponsorship.label.lower()}
+        sponsors[org.id] = {
+            "id": org.id,
+            "name": sponsorship.label.lower(),
+            "css": sponsorship.css,
+        }
 
     return JsonResponse(
         {
@@ -100,7 +129,7 @@ def sponsorships(request):
 @login_required
 def facilities(request):
     """
-    Returns all valid facilities with id and name
+    Return all valid facilities with id and name.
     """
 
     return JsonResponse(
@@ -135,7 +164,15 @@ def enum(request, name):
         "PROTOCOLS",
         "ORG_GROUPS",
         "BOOL_CHOICE_STR",
+        "BOOL_CHOICE_WITH_OPT_OUT_STR",
         "VISIBILITY",
+        "POC_VISIBILITY",
+        "SERVICE_LEVEL_TYPES_TRUNC",
+        "TERMS_TYPES_TRUNC",
+        "SERVICE_LEVEL_TYPES_ADVS",
+        "TERMS_TYPES_ADVS",
+        "PROPERTY",
+        "AVAILABLE_VOLTAGE",
     ]:
         raise Exception("Unknown enum")
 
@@ -157,9 +194,9 @@ def enum(request, name):
 
 def asns(request):
     """
-    Returns a JSON response with a list of asns that the user's
-    organizations own, to use for selecting asn in netixlan
-    creation
+    Return a JSON response with a list of asns that the user's
+    organizations own to use for selecting asn in netixlan
+    creation.
     """
     rv = []
     try:
@@ -173,9 +210,26 @@ def asns(request):
     return JsonResponse({"asns": rv})
 
 
+def my_organizations(request):
+    """
+    Return a JSON response with a list of organization names and ids
+    that the requesting user is a member of.
+    """
+    if not request.user.is_authenticated:
+        return JsonResponse({"my_organizations": []})
+
+    return JsonResponse(
+        {
+            "my_organizations": [
+                {"id": o.id, "name": o.name} for o in request.user.organizations
+            ]
+        }
+    )
+
+
 def organizations(request):
     """
-    Returns a JSON response with a list of organization names and ids
+    Return a JSON response with a list of organization names and ids.
     This is currently only used by the org-merge-tool which is only
     available to site administrators.
     """
@@ -196,7 +250,7 @@ def organizations(request):
 def languages(request):
     from django.conf import settings
 
-    cur_language = translation.get_language()
+    translation.get_language()
     return JsonResponse(
         {"locales": [{"id": id, "name": _(name)} for (id, name) in settings.LANGUAGES]}
     )

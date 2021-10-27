@@ -1,20 +1,20 @@
-import pytest
 import json
 import os
 
-from django.test import TestCase
-from django.contrib.auth.models import Group
+import pytest
 from django.conf import settings
-
-from rest_framework.test import APIRequestFactory, force_authenticate, APIClient
+from django.contrib.auth.models import Group
+from django.test import TestCase
+from django_grainy.models import GroupPermission, UserPermission
 from rest_framework.authtoken.models import Token
-
-import peeringdb_server.models as models
-import peeringdb_server.management.commands.pdb_api_test as api_test
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from twentyc.rpc.client import RestClient
 
-import django_namespace_perms as nsp
 import peeringdb_server.inet as pdbinet
+import peeringdb_server.management.commands.pdb_api_test as api_test
+import peeringdb_server.models as models
+
+from .util import reset_group_ids
 
 RdapLookup_get_asn = pdbinet.RdapLookup.get_asn
 
@@ -89,9 +89,13 @@ class DummyRestClient(RestClient):
         self.useragent = kwargs.get("useragent")
         if self.user:
             self.user_inst = models.User.objects.get(username=self.user)
+        elif kwargs.get("anon"):
+            self.user_inst = None
         else:
             self.user_inst = models.User.objects.get(username="guest")
-        self.api_client.force_authenticate(self.user_inst)
+
+        if self.user_inst:
+            self.api_client.force_authenticate(self.user_inst)
 
     def _request(self, typ, id=0, method="GET", params=None, data=None, url=None):
         if not url:
@@ -137,48 +141,48 @@ class APITests(TestCase, api_test.TestJSON, api_test.Command):
         # create user and guest group
         guest_group = Group.objects.create(name="guest")
         user_group = Group.objects.create(name="user")
-
+        reset_group_ids()
         guest_user = models.User.objects.create_user(
             "guest", "guest@localhost", "guest"
         )
         guest_group.user_set.add(guest_user)
 
-        nsp.models.GroupPermission.objects.create(
-            group=guest_group, namespace="peeringdb.organization", permissions=0x01
+        GroupPermission.objects.create(
+            group=guest_group, namespace="peeringdb.organization", permission=0x01
         )
 
-        nsp.models.GroupPermission.objects.create(
+        GroupPermission.objects.create(
             group=guest_group,
             namespace="peeringdb.organization.*.internetexchange.*.ixf_ixp_member_list_url.public",
-            permissions=0x01,
+            permission=0x01,
         )
 
-        nsp.models.GroupPermission.objects.create(
-            group=user_group, namespace="peeringdb.organization", permissions=0x01
+        GroupPermission.objects.create(
+            group=user_group, namespace="peeringdb.organization", permission=0x01
         )
 
-        nsp.models.GroupPermission.objects.create(
+        GroupPermission.objects.create(
             group=user_group,
             namespace=f"peeringdb.organization.{settings.SUGGEST_ENTITY_ORG}",
-            permissions=0x04,
+            permission=0x04,
         )
 
-        nsp.models.GroupPermission.objects.create(
+        GroupPermission.objects.create(
             group=user_group,
             namespace="peeringdb.organization.*.network.*.poc_set.users",
-            permissions=0x01,
+            permission=0x01,
         )
 
-        nsp.models.GroupPermission.objects.create(
+        GroupPermission.objects.create(
             group=user_group,
             namespace="peeringdb.organization.*.internetexchange.*.ixf_ixp_member_list_url.public",
-            permissions=0x01,
+            permission=0x01,
         )
 
-        nsp.models.GroupPermission.objects.create(
+        GroupPermission.objects.create(
             group=user_group,
             namespace="peeringdb.organization.*.internetexchange.*.ixf_ixp_member_list_url.users",
-            permissions=0x01,
+            permission=0x01,
         )
 
         # prepare api test data

@@ -1,15 +1,20 @@
-import datetime
-import uuid
+"""
+Handle generation of mock data for testing purposes.
+"""
+
 import ipaddress
+import uuid
+
 from django.db import models
+
 from peeringdb_server.models import REFTAG_MAP
 
 
 class Mock:
     """
-    Class that allows us to create mock data in the database
+    Class that allows creation of mock data in the database.
 
-    NOTE: this actually writes data to the database and should
+    NOTE: This actually writes data to the database and should
     only be used to populate a dev instance.
     """
 
@@ -62,12 +67,12 @@ class Mock:
         """
         Create a new instance of model specified in `reftag`
 
-        Any arguments passed as kwargs will override mock field values
+        Any arguments passed as kwargs will override mock field values.
 
-        Note: Unless if there are no relationships passed in kwargs, required parent
+        Note: Unless there are no relationships passed in kwargs, required parent
         objects will be automatically created as well.
 
-        Returns: The created instance
+        Returns: The created instance.
         """
 
         model = REFTAG_MAP.get(reftag)
@@ -174,6 +179,21 @@ class Mock:
     def city(self, data, reftag=None):
         return "Chicago"
 
+    def suite(self, data, reftag=None):
+        return ""
+
+    def floor(self, data, reftag=None):
+        return ""
+
+    def netixlan_updated(self, data, reftag=None):
+        return None
+
+    def poc_updated(self, data, reftag=None):
+        return None
+
+    def netfac_updated(self, data, reftag=None):
+        return None
+
     def latitude(self, data, reftag=None):
         return 0.0
 
@@ -184,7 +204,7 @@ class Mock:
         return "US"
 
     def name(self, data, reftag=None):
-        return "{} {}".format(reftag, str(uuid.uuid4())[:8])
+        return f"{reftag} {str(uuid.uuid4())[:8]}"
 
     def name_long(self, data, reftag=None):
         return self.name(data, reftag=reftag)
@@ -199,13 +219,13 @@ class Mock:
         return self.name(data, reftag=reftag)
 
     def irr_as_set(self, data, reftag=None):
-        return "AS-{}@RIPE".format(str(uuid.uuid4())[:8].upper())
+        return f"AS-{str(uuid.uuid4())[:8].upper()}@RIPE"
 
     def looking_glass(self, data, reftag=None):
-        return "{}/looking-glass".format(self.website(data, reftag=reftag))
+        return f"{self.website(data, reftag=reftag)}/looking-glass"
 
     def route_server(self, data, reftag=None):
-        return "{}/route-server".format(self.website(data, reftag=reftag))
+        return f"{self.website(data, reftag=reftag)}/route-server"
 
     def notes_private(self, data, reftag=None):
         return "Private notes"
@@ -264,4 +284,34 @@ class Mock:
         return 0
 
     def ixf_last_import(self, data, reftag=None):
+        return None
+
+    def ixf_import_request(self, data, reftag=None):
+        return None
+
+    def ixf_import_request_status(self, data, reftag=None):
+        return "queued"
+
+    def ixf_import_request_user(self, data, reftag=None):
+        return None
+
+    def ix_count(self, data, reftag=None):
+        return 0
+
+    def fac_count(self, data, reftag=None):
+        return 0
+
+    def net_count(self, data, reftag=None):
+        return 0
+
+    def role(self, data, reftag=None):
+        return "Abuse"
+
+    def diverse_serving_substations(self, data, reftag=None):
+        return False
+
+    def available_voltage_services(self, data, reftag=None):
+        return None
+
+    def property(self, data, reftag=None):
         return None

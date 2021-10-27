@@ -1,10 +1,12 @@
 import json
-import pytest
 
-from .util import ClientCase
-from .test_api import setup_module, teardown_module
-from peeringdb_server.models import REFTAG_MAP, User
+import pytest
 from rest_framework.test import APIClient, force_authenticate
+
+from peeringdb_server.models import REFTAG_MAP, User
+
+from .test_api import setup_module, teardown_module
+from .util import ClientCase
 
 
 class TestAPIClientCompat(ClientCase):
@@ -42,7 +44,9 @@ class TestAPIClientCompat(ClientCase):
             assert r.status_code == 200
 
         r = self.client.post(
-            "/api/net", {"org_id": org_id, "name": "Test net", "asn": 9000000}, format="json"
+            "/api/net",
+            {"org_id": org_id, "name": "Test net", "asn": 9000000},
+            format="json",
         )
         content = json.loads(r.content)
         if error:

@@ -1,8 +1,12 @@
+"""
+DEPRECATED
+Sync latitude and longitude on all geocoding enabled entities.
+"""
 import googlemaps
 import reversion
-
-from django.core.management.base import BaseCommand
 from django.conf import settings
+from django.core.management.base import BaseCommand
+from django.db import transaction
 
 from peeringdb_server import models
 
@@ -48,6 +52,7 @@ class Command(BaseCommand):
         self.sync(reftag, _id, limit=limit)
 
     @reversion.create_revision()
+    @transaction.atomic()
     def sync(self, reftag, _id, limit=0):
         model = models.REFTAG_MAP.get(reftag)
         if not model:

@@ -1,18 +1,29 @@
 import datetime
-import pytest
 
+import pytest
 from django.core.management import call_command
 
 from peeringdb_server.models import (
+    UTC,
+    Network,
+    NetworkContact,
     Organization,
+    ProtectedAction,
     Sponsorship,
     SponsorshipOrganization,
-    ProtectedAction,
-    UTC,
 )
 
 
-@pytest.mark.djangodb
+def assert_protected(entity):
+    """
+    helper function to test that an object is currently
+    not deletable
+    """
+    with pytest.raises(ProtectedAction):
+        entity.delete()
+
+
+@pytest.mark.django_db
 def test_protected_entities(db):
     """
     test that protected entities cannot be deleted
@@ -28,14 +39,6 @@ def test_protected_entities(db):
     assert org.ix_set_active.exists()
     assert org.fac_set_active.exists()
     assert org.net_set_active.exists()
-
-    def assert_protected(entity):
-        """
-        helper function to test that an object is currently
-        not deletable
-        """
-        with pytest.raises(ProtectedAction):
-            entity.delete()
 
     # org has ix, net and fac under it, and should not be
     # deletable
@@ -85,7 +88,6 @@ def test_protected_entities(db):
 
         # with netixlans gone the exchange can now be
         # deleted
-
         ix.delete()
 
     # org still has active fac and net under it
@@ -138,6 +140,79 @@ def test_protected_entities(db):
 
     org.delete()
     assert org.status == "deleted"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "role,deletable",
+    [
+        ("Technical", False),
+        ("Policy", False),
+        ("NOC", False),
+        ("Abuse", True),
+        ("Maintenance", True),
+        ("Public Relations", True),
+        ("Sales", True),
+    ],
+)
+def test_tech_poc_protection(role, deletable):
+    """
+    Test that the last technical contact
+    cannot be deleted for a network that has
+    active peers (#923)
+    """
+
+    call_command("pdb_generate_test_data", limit=2, commit=True)
+
+    net = Network.objects.first()
+
+    poc = NetworkContact.objects.create(status="ok", role=role, network=net)
+
+    if not deletable:
+        assert_protected(poc)
+        for netixlan in net.netixlan_set_active.all():
+            netixlan.delete()
+        poc.delete()
+    else:
+        poc.delete()
+        return
+
+    poc2 = NetworkContact.objects.create(status="ok", role=role, network=net)
+
+    poc.delete()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "role",
+    [
+        "Technical",
+        "Policy",
+        "NOC",
+        "Abuse",
+        "Maintenance",
+        "Public Relations",
+        "Sales",
+    ],
+)
+def test_tech_poc_hard_delete_1013(role):
+    """
+    Test that already soft-deleted pocs dont raise
+    a protected action error when hard-deleting (#1013)
+    """
+
+    call_command("pdb_generate_test_data", limit=2, commit=True)
+
+    net = Network.objects.first()
+
+    net.poc_set.all().delete()
+
+    poc_a = NetworkContact.objects.create(status="ok", role="Technical", network=net)
+    poc_b = NetworkContact.objects.create(status="deleted", role=role, network=net)
+    poc_b.delete(hard=True)
+
+    poc_a.delete(force=True)
+    poc_a.delete(hard=True)
 
 
 @pytest.mark.django_db

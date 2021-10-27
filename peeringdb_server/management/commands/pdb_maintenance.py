@@ -1,5 +1,9 @@
-from django.core.management.base import BaseCommand
+"""
+Put peeringdb in or out of maintenance mode.
+"""
 from django.conf import settings
+from django.core.management.base import BaseCommand
+
 from peeringdb_server import maintenance
 
 
