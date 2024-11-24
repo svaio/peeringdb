@@ -58,11 +58,18 @@ services:
       - database
       - elasticsearch
     environment:
+      DATABASE_ENGINE: "mysql"
+#      DATABASE_HOST: "127.0.0.1"
+      DATABASE_NAME: peeringdb
       DATABASE_USER: peeringdb
       DATABASE_PASSWORD: devPASSWORD
       DATABASE_HOST: database
-      REDIS_HOST: redis
-      REDIS_PASSWORD: devPASSWORD
+#    # set logging options to output in json
+#    logging:
+#      driver: json-file
+#      options:
+#        max-size: 100m
+#        max-file: "3"
     ports:
       # this needs to be set in the shell, compose env vars aren't read yet
       - "${DJANGO_PORT:-8000}:8000"
